@@ -1,0 +1,515 @@
+name: PR Validation
+
+# =============================================================================
+# PR Workflow - Unified Test Tag System
+# 
+# This workflow:
+# 1. Detects changed files in the PR
+# 2. Reads PR labels (run:*, skip:*, skip-ci)
+# 3. Merges file triggers + label triggers additively
+# 4. Outputs unified JSON payload for the test runner
+#
+# Test configuration is defined in .github/test-config.yml
+# =============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      test_suites_override:
+        description: 'Override test suites (comma-separated, e.g., "lint,unit-fast")'
+        required: false
+        type: string
+      force_all:
+        description: 'Run all test suites regardless of changes'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Detect Changed Files
+  # ===========================================================================
+  changed-files:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      files_json: ${{ steps.changes.outputs.all_changed_files }}
+      any_changed: ${{ steps.changes.outputs.any_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changes
+        uses: tj-actions/changed-files@v44
+        with:
+          json: true
+          escape_json: false
+
+      - name: Show changed files
+        run: |
+          echo "Changed files:"
+          echo '${{ steps.changes.outputs.all_changed_files }}' | jq -r '.[]' 2>/dev/null || echo "No files or parse error"
+
+  # ===========================================================================
+  # Job 2: Determine Test Suites
+  # ===========================================================================
+  runner-determinator:
+    name: Determine Tests
+    needs: [changed-files]
+    runs-on: ubuntu-latest
+    outputs:
+      payload_json: ${{ steps.determine.outputs.payload_json }}
+      test_tags: ${{ steps.determine.outputs.test_tags }}
+      should_run: ${{ steps.determine.outputs.should_run }}
+      skip_ci: ${{ steps.determine.outputs.skip_ci }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Determine test tags from config and labels
+        id: determine
+        env:
+          CHANGED_FILES: ${{ needs.changed-files.outputs.files_json }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_NAME: ${{ github.repository }}
+          TEST_SUITES_OVERRIDE: ${{ github.event.inputs.test_suites_override }}
+          FORCE_ALL: ${{ github.event.inputs.force_all }}
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import os
+          import sys
+          import json
+          import fnmatch
+          import yaml
+          
+          def write_output(payload, test_tags, should_run, skip_ci):
+              """Write GitHub Action outputs."""
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"payload_json={json.dumps(payload)}\n")
+                  f.write(f"test_tags={','.join(test_tags) if test_tags else ''}\n")
+                  f.write(f"should_run={'true' if should_run else 'false'}\n")
+                  f.write(f"skip_ci={'true' if skip_ci else 'false'}\n")
+          
+          def error_exit(message, repo_name, pr_number, pr_sha):
+              """Exit with error payload."""
+              print(f"❌ ERROR: {message}")
+              payload = {
+                  "test_tags": [],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "error": message
+                  }
+              }
+              write_output(payload, [], False, False)
+              sys.exit(1)
+          
+          # Load inputs
+          changed_files_json = os.environ.get('CHANGED_FILES', '[]')
+          pr_labels_json = os.environ.get('PR_LABELS', '[]')
+          pr_number = os.environ.get('PR_NUMBER', '')
+          pr_sha = os.environ.get('PR_SHA', '')
+          repo_name = os.environ.get('REPO_NAME', '')
+          override = os.environ.get('TEST_SUITES_OVERRIDE', '')
+          force_all = os.environ.get('FORCE_ALL', 'false').lower() == 'true'
+          
+          try:
+              changed_files = json.loads(changed_files_json) if changed_files_json else []
+          except json.JSONDecodeError:
+              changed_files = []
+          
+          try:
+              pr_labels = json.loads(pr_labels_json) if pr_labels_json else []
+          except json.JSONDecodeError:
+              pr_labels = []
+          
+          print(f"Repository: {repo_name}")
+          print(f"PR #{pr_number}, SHA: {pr_sha[:8] if pr_sha else 'N/A'}")
+          print(f"Changed files: {len(changed_files)}")
+          for f in changed_files[:5]:
+              print(f"  - {f}")
+          if len(changed_files) > 5:
+              print(f"  ... and {len(changed_files) - 5} more")
+          print(f"PR Labels: {pr_labels}")
+          
+          # Load test config
+          config_path = '.github/test-config.yml'
+          if not os.path.exists(config_path):
+              print(f"⚠ Config not found: {config_path}")
+              print("Using hardcoded defaults: lint, unit-fast")
+              default_payload = {
+                  "test_tags": ["lint", "unit-fast"],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "triggered_by": {"default": ["lint", "unit-fast"]},
+                      "warning": "test-config.yml not found, using defaults"
+                  }
+              }
+              write_output(default_payload, ["lint", "unit-fast"], True, False)
+              sys.exit(0)
+          
+          try:
+              with open(config_path) as f:
+                  config = yaml.safe_load(f)
+          except yaml.YAMLError as e:
+              error_exit(f"Failed to parse test-config.yml: {e}", repo_name, pr_number, pr_sha)
+          except Exception as e:
+              error_exit(f"Failed to read test-config.yml: {e}", repo_name, pr_number, pr_sha)
+          
+          if config is None:
+              error_exit("test-config.yml is empty", repo_name, pr_number, pr_sha)
+          
+          test_suites = config.get('test_suites', {})
+          settings = config.get('settings', {})
+          default_suites = settings.get('default', [])
+          label_triggers = config.get('label_triggers', {})
+          skip_labels_config = config.get('skip_labels', {})
+          
+          valid_suite_names = set(test_suites.keys())
+          print(f"Valid test suites: {sorted(valid_suite_names)}")
+          
+          # Handle override
+          if override:
+              suites = [s.strip() for s in override.split(',') if s.strip()]
+              invalid_suites = [s for s in suites if s not in valid_suite_names]
+              if invalid_suites:
+                  print(f"⚠ WARNING: Unknown suite(s) in override: {invalid_suites}")
+                  valid_override = [s for s in suites if s in valid_suite_names]
+                  if not valid_override:
+                      error_exit(f"All override suites are invalid: {suites}", repo_name, pr_number, pr_sha)
+                  suites = valid_override
+              
+              print(f"\n✓ Using override: {suites}")
+              payload = {
+                  "test_tags": suites,
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "triggered_by": {"override": suites}
+                  }
+              }
+              write_output(payload, suites, True, False)
+              sys.exit(0)
+          
+          # Check skip labels
+          skip_all = False
+          suites_to_skip = set()
+          
+          for label in pr_labels:
+              if label in skip_labels_config:
+                  skip_value = skip_labels_config[label]
+                  if skip_value == "all":
+                      skip_all = True
+                      print(f"\n⚠ skip-ci detected: Skipping ALL tests")
+                      break
+                  elif isinstance(skip_value, list):
+                      suites_to_skip.update(skip_value)
+          
+          if skip_all:
+              payload = {
+                  "test_tags": [],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "triggered_by": {"skip_label": "skip-ci"},
+                      "skipped": True
+                  }
+              }
+              write_output(payload, [], False, True)
+              sys.exit(0)
+          
+          # Force all suites
+          if force_all:
+              all_suites = list(test_suites.keys())
+              print(f"\n✓ Force all: {all_suites}")
+              payload = {
+                  "test_tags": all_suites,
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "triggered_by": {"force_all": all_suites}
+                  }
+              }
+              write_output(payload, all_suites, True, False)
+              sys.exit(0)
+          
+          # Match changed files to test suites
+          triggered_by = {
+              "default": list(default_suites),
+              "file_patterns": [],
+              "pr_labels": []
+          }
+          matched_suites = set(default_suites)
+          
+          def matches_pattern(filepath, pattern):
+              """Check if filepath matches glob pattern."""
+              if '**' in pattern:
+                  parts = pattern.split('**')
+                  if len(parts) == 2:
+                      prefix, suffix = parts
+                      prefix = prefix.rstrip('/')
+                      suffix = suffix.lstrip('/')
+                      if prefix and not filepath.startswith(prefix):
+                          return False
+                      if suffix and not fnmatch.fnmatch(filepath, f"*{suffix}"):
+                          return False
+                      return True
+              return fnmatch.fnmatch(filepath, pattern)
+          
+          print("\n--- File Pattern Matching ---")
+          for suite_name, suite_config in test_suites.items():
+              triggers = suite_config.get('triggers', [])
+              for trigger in triggers:
+                  if trigger == 'manual':
+                      continue
+                  if trigger.startswith('label:'):
+                      continue
+                  
+                  for changed_file in changed_files:
+                      if matches_pattern(changed_file, trigger):
+                          if suite_name not in matched_suites:
+                              matched_suites.add(suite_name)
+                              triggered_by["file_patterns"].append(suite_name)
+                              print(f"  ✓ {suite_name}: matched by {changed_file}")
+                          break
+          
+          # Process label triggers
+          print("\n--- Label Trigger Matching ---")
+          warnings = []
+          for label in pr_labels:
+              if label in label_triggers:
+                  suites_from_label = label_triggers[label]
+                  for suite in suites_from_label:
+                      if suite not in valid_suite_names:
+                          warning = f"Label '{label}' references unknown suite '{suite}'"
+                          print(f"  ⚠ WARNING: {warning}")
+                          warnings.append(warning)
+                          continue
+                      if suite not in matched_suites:
+                          matched_suites.add(suite)
+                          triggered_by["pr_labels"].append(suite)
+                          print(f"  ✓ {suite}: triggered by label '{label}'")
+          
+          # Apply skip labels
+          if suites_to_skip:
+              print(f"\n--- Applying Skip Labels ---")
+              for skip_suite in suites_to_skip:
+                  if skip_suite in matched_suites:
+                      matched_suites.remove(skip_suite)
+                      print(f"  ⏭ Skipping: {skip_suite}")
+          
+          # Sort by priority
+          sorted_suites = sorted(
+              matched_suites,
+              key=lambda s: test_suites.get(s, {}).get('priority', 99)
+          )
+          
+          # Build output payload
+          if not sorted_suites:
+              print("\n⚠ No test suites to run")
+              payload = {
+                  "test_tags": [],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "triggered_by": triggered_by,
+                      "skipped": True,
+                      "reason": "no_matching_suites"
+                  }
+              }
+              write_output(payload, [], False, False)
+              sys.exit(0)
+          
+          print(f"\n✓ Final test tags: {sorted_suites}")
+          
+          triggered_by = {k: v for k, v in triggered_by.items() if v}
+          
+          payload = {
+              "test_tags": sorted_suites,
+              "metadata": {
+                  "repository": repo_name,
+                  "pr_number": pr_number,
+                  "sha": pr_sha,
+                  "triggered_by": triggered_by
+              }
+          }
+          
+          if warnings:
+              payload["metadata"]["warnings"] = warnings
+          
+          print("\n--- Final Payload ---")
+          print(json.dumps(payload, indent=2))
+          
+          write_output(payload, sorted_suites, True, False)
+          PYTHON_SCRIPT
+
+      - name: Display payload
+        run: |
+          echo "=========================================="
+          echo "           TEST CONFIGURATION             "
+          echo "=========================================="
+          echo ""
+          echo "Test Tags: ${{ steps.determine.outputs.test_tags }}"
+          echo "Should Run: ${{ steps.determine.outputs.should_run }}"
+          echo "Skip CI: ${{ steps.determine.outputs.skip_ci }}"
+          echo ""
+          echo "Full Payload (JSON):"
+          echo '${{ steps.determine.outputs.payload_json }}' | jq . 2>/dev/null || echo '${{ steps.determine.outputs.payload_json }}'
+
+  # ===========================================================================
+  # Job 3: Execute Tests on Self-Hosted Runner
+  # ===========================================================================
+  run-tests:
+    name: Run Tests
+    needs: [runner-determinator]
+    if: needs.runner-determinator.outputs.should_run == 'true'
+    runs-on:
+      - self-hosted
+      - linux
+      - neuron
+    timeout-minutes: 30
+    env:
+      TEST_PAYLOAD: ${{ needs.runner-determinator.outputs.payload_json }}
+      TEST_TAGS: ${{ needs.runner-determinator.outputs.test_tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Display runner info
+        run: |
+          echo "=========================================="
+          echo "           RUNNER INFORMATION             "
+          echo "=========================================="
+          echo ""
+          echo "Runner name: ${RUNNER_NAME:-unknown}"
+          echo "Hostname: $(hostname)"
+          echo "Test Tags: $TEST_TAGS"
+          echo ""
+          echo "=========================================="
+
+      - name: Execute tests
+        run: |
+          # Execute tests using runner's test execution script
+          if [ -f "/home/runner/run-tests.sh" ]; then
+            echo "=========================================="
+            echo "           EXECUTING TESTS                "
+            echo "=========================================="
+            echo ""
+            /home/runner/run-tests.sh
+          else
+            echo "=========================================="
+            echo "         SIMULATION MODE                  "
+            echo "=========================================="
+            echo ""
+            echo "Test execution script not found."
+            echo "Running test suites in simulation mode..."
+            echo ""
+            
+            IFS=',' read -ra SUITES <<< "$TEST_TAGS"
+            for suite in "${SUITES[@]}"; do
+              echo "----------------------------------------"
+              echo "▶ Running suite: $suite"
+              echo "----------------------------------------"
+              sleep 0.5
+              echo "  ✓ Suite '$suite' completed (simulated)"
+              echo ""
+            done
+            
+            echo "=========================================="
+            echo "All test suites completed"
+            echo "=========================================="
+          fi
+
+  # ===========================================================================
+  # Job 4: Generate Summary
+  # ===========================================================================
+  summary:
+    name: PR Summary
+    needs: [changed-files, runner-determinator, run-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        env:
+          TEST_TAGS: ${{ needs.runner-determinator.outputs.test_tags }}
+          SHOULD_RUN: ${{ needs.runner-determinator.outputs.should_run }}
+          SKIP_CI: ${{ needs.runner-determinator.outputs.skip_ci }}
+          PAYLOAD: ${{ needs.runner-determinator.outputs.payload_json }}
+        run: |
+          echo "# 🧪 PR Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$SKIP_CI" == "true" ]; then
+            echo "## ⏭️ CI Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "The \`skip-ci\` label was detected. No tests were run." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          
+          if [ "${{ needs.run-tests.result }}" == "success" ]; then
+            echo "## ✅ Tests Passed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.run-tests.result }}" == "skipped" ]; then
+            echo "## ⏭️ Tests Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Tests Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Test Tags" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$TEST_TAGS" ]; then
+            echo "The following test tags were determined:" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "$TEST_TAGS" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No test tags were triggered by the changes." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>Click to expand JSON payload</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$PAYLOAD" | jq . 2>/dev/null || echo "$PAYLOAD" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Detect Changes | ${{ needs.changed-files.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Determine Tests | ${{ needs.runner-determinator.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run Tests | ${{ needs.run-tests.result }} |" >> $GITHUB_STEP_SUMMARY

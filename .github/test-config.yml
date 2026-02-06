@@ -1,0 +1,286 @@
+# =============================================================================
+# Test Configuration Framework
+# 
+# This file defines the test suites, their triggers, and configuration.
+# The runner-determinator job reads this to decide which tests to run.
+#
+# Usage:
+# - Test suites are matched based on file path patterns
+# - PR labels with prefix "run:" trigger additional suites
+# - Multiple sources (files + labels) are merged additively
+# =============================================================================
+
+# Global settings
+settings:
+  # Default timeout for all test suites (can be overridden per suite)
+  default_timeout_minutes: 60
+  
+  # Maximum concurrent test suites
+  max_parallel_suites: 5
+  
+  # Whether to fail fast or run all suites
+  fail_fast: false
+  
+  # Default test suites to always run (unless skip-ci is set)
+  default:
+    - lint
+    - unit-fast
+
+# =============================================================================
+# Label → Suite Mapping (Explicit)
+# 
+# PR labels use prefix "run:" to trigger test suites
+# Example: Label "run:full" triggers ["integration-full", "performance"]
+# =============================================================================
+label_triggers:
+  # run:full → Run comprehensive test suite
+  "run:full":
+    - integration-full
+    - performance
+  
+  # run:convergence → Run long-running training tests
+  "run:convergence":
+    - training-convergence
+  
+  # run:inference → Run inference-specific tests
+  "run:inference":
+    - inference-e2e
+  
+  # run:integration → Run all integration tests
+  "run:integration":
+    - integration-basic
+    - integration-compiler
+    - integration-runtime
+  
+  # run:benchmarks → Run performance benchmarks
+  "run:benchmarks":
+    - performance
+
+# =============================================================================
+# Skip Labels
+# 
+# These labels skip tests (take precedence over triggers)
+# =============================================================================
+skip_labels:
+  # skip-ci → Skip ALL tests
+  "skip-ci": "all"
+  
+  # skip:lint → Skip only lint suite
+  "skip:lint": ["lint"]
+  
+  # skip:integration → Skip all integration suites
+  "skip:integration":
+    - integration-basic
+    - integration-compiler
+    - integration-runtime
+    - integration-full
+
+# =============================================================================
+# Test Suite Definitions
+# =============================================================================
+test_suites:
+  # ---------------------------------------------------------------------------
+  # Tier 1: Fast Checks (run on every PR)
+  # ---------------------------------------------------------------------------
+  lint:
+    description: "Code linting and style checks"
+    priority: 1
+    timeout_minutes: 10
+    hardware: cpu
+    triggers:
+      - "**/*.py"
+      - "**/*.cpp"
+      - "**/*.h"
+      - "**/*.hpp"
+    commands:
+      - "ruff check ."
+      - "black --check ."
+      - "isort --check ."
+    required: true  # Must pass for PR to merge
+
+  unit-fast:
+    description: "Fast unit tests (no hardware required)"
+    priority: 1
+    timeout_minutes: 15
+    hardware: cpu
+    triggers:
+      - "**/*.py"
+    commands:
+      - "pytest tests/unit -x -q --tb=short"
+    required: true
+
+  # ---------------------------------------------------------------------------
+  # Tier 2: Component-Specific Tests
+  # ---------------------------------------------------------------------------
+  unit-torch-neuronx:
+    description: "torch_neuronx unit tests"
+    priority: 2
+    timeout_minutes: 30
+    hardware: cpu
+    triggers:
+      - "torch_neuronx/**"
+      - "tests/torch_neuronx/**"
+    commands:
+      - "pytest tests/torch_neuronx/unit -v"
+
+  unit-compiler:
+    description: "Compiler unit tests"
+    priority: 2
+    timeout_minutes: 30
+    hardware: cpu
+    triggers:
+      - "compiler/**"
+      - "neuronx_cc/**"
+      - "tests/compiler/**"
+    commands:
+      - "pytest tests/compiler/unit -v"
+
+  unit-runtime:
+    description: "Runtime unit tests"
+    priority: 2
+    timeout_minutes: 30
+    hardware: cpu
+    triggers:
+      - "runtime/**"
+      - "libnrt/**"
+      - "tests/runtime/**"
+    commands:
+      - "pytest tests/runtime/unit -v"
+
+  # ---------------------------------------------------------------------------
+  # Tier 3: Integration Tests (require Trainium hardware)
+  # ---------------------------------------------------------------------------
+  integration-basic:
+    description: "Basic integration tests on Trainium"
+    priority: 3
+    timeout_minutes: 60
+    hardware: trn1
+    instance_type: trn1.2xlarge
+    triggers:
+      - "torch_neuronx/**"
+      - "tests/integration/**"
+    commands:
+      - "pytest tests/integration/basic -v --tb=long"
+    env:
+      NEURON_RT_NUM_CORES: "2"
+
+  integration-compiler:
+    description: "Compiler integration tests"
+    priority: 3
+    timeout_minutes: 90
+    hardware: trn1
+    instance_type: trn1.2xlarge
+    triggers:
+      - "compiler/**"
+      - "neuronx_cc/**"
+    commands:
+      - "pytest tests/integration/compiler -v"
+
+  integration-runtime:
+    description: "Runtime integration tests"
+    priority: 3
+    timeout_minutes: 90
+    hardware: trn1
+    instance_type: trn1.2xlarge
+    triggers:
+      - "runtime/**"
+      - "libnrt/**"
+    commands:
+      - "pytest tests/integration/runtime -v"
+
+  # ---------------------------------------------------------------------------
+  # Tier 4: Full Test Suites (manual or label-triggered)
+  # ---------------------------------------------------------------------------
+  integration-full:
+    description: "Full integration test suite"
+    priority: 4
+    timeout_minutes: 180
+    hardware: trn1
+    instance_type: trn1.32xlarge
+    triggers:
+      - manual  # Only triggered by label "run:full" or manual dispatch
+    commands:
+      - "pytest tests/integration -v --tb=long"
+    env:
+      NEURON_RT_NUM_CORES: "32"
+
+  performance:
+    description: "Performance benchmark tests"
+    priority: 4
+    timeout_minutes: 240
+    hardware: trn1
+    instance_type: trn1.32xlarge
+    triggers:
+      - manual  # Only triggered by label "run:benchmarks" or manual dispatch
+    commands:
+      - "python benchmarks/run_benchmarks.py --suite pr"
+    allow_failure: true  # Don't block PR merge
+
+  # ---------------------------------------------------------------------------
+  # Special Test Suites
+  # ---------------------------------------------------------------------------
+  training-convergence:
+    description: "Training convergence tests (long-running)"
+    priority: 5
+    timeout_minutes: 480  # 8 hours
+    hardware: trn1
+    instance_type: trn1.32xlarge
+    triggers:
+      - manual  # Only triggered by label "run:convergence"
+    commands:
+      - "python tests/training/convergence.py"
+    nightly: true
+    allow_failure: true
+
+  inference-e2e:
+    description: "End-to-end inference tests"
+    priority: 3
+    timeout_minutes: 60
+    hardware: inf2
+    instance_type: inf2.xlarge
+    triggers:
+      - "inference/**"
+      - "tests/inference/**"
+    commands:
+      - "pytest tests/inference -v"
+
+# =============================================================================
+# Branch Configuration
+# =============================================================================
+branches:
+  main:
+    # Tests to run on every merge to main
+    on_merge:
+      - lint
+      - unit-fast
+      - unit-torch-neuronx
+      - integration-basic
+  
+  release/*:
+    # Full test suite for release branches
+    on_merge:
+      - lint
+      - unit-fast
+      - unit-torch-neuronx
+      - unit-compiler
+      - unit-runtime
+      - integration-basic
+      - integration-compiler
+      - integration-runtime
+
+# =============================================================================
+# Nightly Schedule
+# =============================================================================
+nightly:
+  enabled: true
+  schedule: "0 4 * * *"  # 4 AM UTC daily
+  suites:
+    - lint
+    - unit-fast
+    - unit-torch-neuronx
+    - unit-compiler
+    - unit-runtime
+    - integration-basic
+    - integration-full
+    - performance
+    - training-convergence
