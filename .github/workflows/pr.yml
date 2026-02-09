@@ -390,14 +390,18 @@ jobs:
   # ===========================================================================
   # Job 3: Execute Tests on Self-Hosted Runner
   # ===========================================================================
+  # 
+  # The single 'neuron' label triggers our ALI infrastructure:
+  # 1. GitHub sends webhook to Webhook Lambda
+  # 2. Scale-Up Lambda launches EC2 runner
+  # 3. EC2 registers with GitHub, runs this job, then terminates
+  # ===========================================================================
   run-tests:
     name: Run Tests
     needs: [runner-determinator]
     if: needs.runner-determinator.outputs.should_run == 'true'
-    runs-on:
-      - self-hosted
-      - linux
-      - neuron
+    # Single label per HLD recommendation - maps directly to instance type
+    runs-on: neuron
     timeout-minutes: 30
     env:
       TEST_PAYLOAD: ${{ needs.runner-determinator.outputs.payload_json }}
@@ -409,12 +413,32 @@ jobs:
       - name: Display runner info
         run: |
           echo "=========================================="
-          echo "           RUNNER INFORMATION             "
+          echo "        SELF-HOSTED RUNNER INFO           "
           echo "=========================================="
           echo ""
           echo "Runner name: ${RUNNER_NAME:-unknown}"
           echo "Hostname: $(hostname)"
           echo "Test Tags: $TEST_TAGS"
+          echo ""
+          echo "--- EC2 Metadata ---"
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+          if [ -n "$TOKEN" ]; then
+            echo "Instance ID: $(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo 'N/A')"
+            echo "Instance Type: $(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || echo 'N/A')"
+          else
+            echo "(EC2 metadata not available - might be GitHub-hosted runner)"
+          fi
+          echo ""
+          echo "=========================================="
+
+      - name: Display test payload
+        run: |
+          echo "=========================================="
+          echo "             TEST PAYLOAD                 "
+          echo "=========================================="
+          echo ""
+          echo "Payload:"
+          echo "$TEST_PAYLOAD" | jq . 2>/dev/null || echo "$TEST_PAYLOAD"
           echo ""
           echo "=========================================="
 
