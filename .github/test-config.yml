@@ -1,286 +1,162 @@
 # =============================================================================
-# Test Configuration Framework
-# 
-# This file defines the test suites, their triggers, and configuration.
-# The runner-determinator job reads this to decide which tests to run.
+# Test Configuration - Neuron CI
 #
-# Usage:
-# - Test suites are matched based on file path patterns
-# - PR labels with prefix "run:" trigger additional suites
-# - Multiple sources (files + labels) are merged additively
+# Defines test suites, their triggers, runner types, and configuration.
+# The runner-determinator job reads this to decide which tests to run
+# and on which runner each suite executes.
+#
+# Runner types:
+#   ubuntu-latest  → GitHub-hosted (lint, fast CPU tests)
+#   neuron.cpu     → Self-hosted EC2 with Neuron SDK (CPU-only tests)
+#   neuron         → Kaizen proxy for Trainium/Inferentia hardware tests
+#
+# Fan-out pattern: each suite becomes its own GitHub Actions job
+# with its own runs-on label, running in parallel.
 # =============================================================================
 
-# Global settings
 settings:
-  # Default timeout for all test suites (can be overridden per suite)
-  default_timeout_minutes: 60
-  
-  # Maximum concurrent test suites
-  max_parallel_suites: 5
-  
-  # Whether to fail fast or run all suites
-  fail_fast: false
-  
-  # Default test suites to always run (unless skip-ci is set)
+  # Default suites that always run on every PR (unless skip-ci)
   default:
     - lint
     - unit-fast
 
 # =============================================================================
-# Label → Suite Mapping (Explicit)
-# 
-# PR labels use prefix "run:" to trigger test suites
-# Example: Label "run:full" triggers ["integration-full", "performance"]
+# Label → Suite Mapping
+# PR labels with "run:" prefix trigger additional suites
 # =============================================================================
 label_triggers:
-  # run:full → Run comprehensive test suite
   "run:full":
+    - integration-basic
     - integration-full
-    - performance
-  
-  # run:convergence → Run long-running training tests
-  "run:convergence":
-    - training-convergence
-  
-  # run:inference → Run inference-specific tests
-  "run:inference":
-    - inference-e2e
-  
-  # run:integration → Run all integration tests
   "run:integration":
     - integration-basic
-    - integration-compiler
-    - integration-runtime
-  
-  # run:benchmarks → Run performance benchmarks
+  "run:convergence":
+    - training-convergence
   "run:benchmarks":
     - performance
 
 # =============================================================================
-# Skip Labels
-# 
-# These labels skip tests (take precedence over triggers)
+# Skip Labels (take precedence over triggers)
 # =============================================================================
 skip_labels:
-  # skip-ci → Skip ALL tests
   "skip-ci": "all"
-  
-  # skip:lint → Skip only lint suite
-  "skip:lint": ["lint"]
-  
-  # skip:integration → Skip all integration suites
+  "skip:lint":
+    - lint
   "skip:integration":
     - integration-basic
-    - integration-compiler
-    - integration-runtime
     - integration-full
 
 # =============================================================================
 # Test Suite Definitions
+#
+# Each suite specifies:
+#   runner     - GitHub Actions runs-on label
+#   hardware   - cpu | trn1 | inf2
+#   priority   - lower = runs first in summary ordering
+#   triggers   - file glob patterns or "manual"
+#   commands   - shell commands to execute
 # =============================================================================
 test_suites:
-  # ---------------------------------------------------------------------------
-  # Tier 1: Fast Checks (run on every PR)
-  # ---------------------------------------------------------------------------
+
+  # -------------------------------------------------------------------------
+  # Tier 1: Fast Checks (every PR, GitHub-hosted runners)
+  # -------------------------------------------------------------------------
   lint:
-    description: "Code linting and style checks"
+    description: "Code linting and formatting checks"
     priority: 1
-    timeout_minutes: 10
+    runner: ubuntu-latest
     hardware: cpu
+    timeout_minutes: 10
     triggers:
       - "**/*.py"
-      - "**/*.cpp"
-      - "**/*.h"
-      - "**/*.hpp"
+      - "pyproject.toml"
+      - ".ruff.toml"
     commands:
+      - "pip install ruff"
       - "ruff check ."
-      - "black --check ."
-      - "isort --check ."
-    required: true  # Must pass for PR to merge
+      - "ruff format --check ."
+    required: true
 
   unit-fast:
     description: "Fast unit tests (no hardware required)"
     priority: 1
-    timeout_minutes: 15
+    runner: ubuntu-latest
     hardware: cpu
+    timeout_minutes: 15
     triggers:
       - "**/*.py"
     commands:
-      - "pytest tests/unit -x -q --tb=short"
+      - "pip install pytest"
+      - "python -m pytest tests/unit -x -q --tb=short"
     required: true
 
-  # ---------------------------------------------------------------------------
-  # Tier 2: Component-Specific Tests
-  # ---------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Tier 2: Component Tests (self-hosted CPU runners - FUTURE)
+  # -------------------------------------------------------------------------
   unit-torch-neuronx:
-    description: "torch_neuronx unit tests"
+    description: "torch_neuronx unit tests (needs Neuron SDK)"
     priority: 2
-    timeout_minutes: 30
+    runner: neuron.cpu
     hardware: cpu
+    timeout_minutes: 30
     triggers:
-      - "torch_neuronx/**"
-      - "tests/torch_neuronx/**"
+      - manual  # Job is not yet active in pr.yml — enable file triggers when job is uncommented
     commands:
       - "pytest tests/torch_neuronx/unit -v"
 
-  unit-compiler:
-    description: "Compiler unit tests"
-    priority: 2
-    timeout_minutes: 30
-    hardware: cpu
-    triggers:
-      - "compiler/**"
-      - "neuronx_cc/**"
-      - "tests/compiler/**"
-    commands:
-      - "pytest tests/compiler/unit -v"
-
-  unit-runtime:
-    description: "Runtime unit tests"
-    priority: 2
-    timeout_minutes: 30
-    hardware: cpu
-    triggers:
-      - "runtime/**"
-      - "libnrt/**"
-      - "tests/runtime/**"
-    commands:
-      - "pytest tests/runtime/unit -v"
-
-  # ---------------------------------------------------------------------------
-  # Tier 3: Integration Tests (require Trainium hardware)
-  # ---------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Tier 3: Integration Tests (Trainium via Kaizen proxy)
+  # -------------------------------------------------------------------------
   integration-basic:
     description: "Basic integration tests on Trainium"
     priority: 3
-    timeout_minutes: 60
+    runner: neuron
     hardware: trn1
-    instance_type: trn1.2xlarge
+    timeout_minutes: 60
     triggers:
-      - "torch_neuronx/**"
-      - "tests/integration/**"
+      - manual
     commands:
       - "pytest tests/integration/basic -v --tb=long"
     env:
       NEURON_RT_NUM_CORES: "2"
 
-  integration-compiler:
-    description: "Compiler integration tests"
-    priority: 3
-    timeout_minutes: 90
-    hardware: trn1
-    instance_type: trn1.2xlarge
-    triggers:
-      - "compiler/**"
-      - "neuronx_cc/**"
-    commands:
-      - "pytest tests/integration/compiler -v"
-
-  integration-runtime:
-    description: "Runtime integration tests"
-    priority: 3
-    timeout_minutes: 90
-    hardware: trn1
-    instance_type: trn1.2xlarge
-    triggers:
-      - "runtime/**"
-      - "libnrt/**"
-    commands:
-      - "pytest tests/integration/runtime -v"
-
-  # ---------------------------------------------------------------------------
-  # Tier 4: Full Test Suites (manual or label-triggered)
-  # ---------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Tier 4: Full Suites (manual/label-triggered only)
+  # -------------------------------------------------------------------------
   integration-full:
     description: "Full integration test suite"
     priority: 4
-    timeout_minutes: 180
+    runner: neuron
     hardware: trn1
-    instance_type: trn1.32xlarge
+    timeout_minutes: 180
     triggers:
-      - manual  # Only triggered by label "run:full" or manual dispatch
+      - manual
     commands:
       - "pytest tests/integration -v --tb=long"
     env:
       NEURON_RT_NUM_CORES: "32"
 
   performance:
-    description: "Performance benchmark tests"
+    description: "Performance benchmarks"
     priority: 4
-    timeout_minutes: 240
+    runner: neuron
     hardware: trn1
-    instance_type: trn1.32xlarge
+    timeout_minutes: 240
     triggers:
-      - manual  # Only triggered by label "run:benchmarks" or manual dispatch
+      - manual
     commands:
       - "python benchmarks/run_benchmarks.py --suite pr"
-    allow_failure: true  # Don't block PR merge
+    allow_failure: true
 
-  # ---------------------------------------------------------------------------
-  # Special Test Suites
-  # ---------------------------------------------------------------------------
   training-convergence:
     description: "Training convergence tests (long-running)"
     priority: 5
-    timeout_minutes: 480  # 8 hours
+    runner: neuron
     hardware: trn1
-    instance_type: trn1.32xlarge
+    timeout_minutes: 480
     triggers:
-      - manual  # Only triggered by label "run:convergence"
+      - manual
     commands:
       - "python tests/training/convergence.py"
     nightly: true
     allow_failure: true
-
-  inference-e2e:
-    description: "End-to-end inference tests"
-    priority: 3
-    timeout_minutes: 60
-    hardware: inf2
-    instance_type: inf2.xlarge
-    triggers:
-      - "inference/**"
-      - "tests/inference/**"
-    commands:
-      - "pytest tests/inference -v"
-
-# =============================================================================
-# Branch Configuration
-# =============================================================================
-branches:
-  main:
-    # Tests to run on every merge to main
-    on_merge:
-      - lint
-      - unit-fast
-      - unit-torch-neuronx
-      - integration-basic
-  
-  release/*:
-    # Full test suite for release branches
-    on_merge:
-      - lint
-      - unit-fast
-      - unit-torch-neuronx
-      - unit-compiler
-      - unit-runtime
-      - integration-basic
-      - integration-compiler
-      - integration-runtime
-
-# =============================================================================
-# Nightly Schedule
-# =============================================================================
-nightly:
-  enabled: true
-  schedule: "0 4 * * *"  # 4 AM UTC daily
-  suites:
-    - lint
-    - unit-fast
-    - unit-torch-neuronx
-    - unit-compiler
-    - unit-runtime
-    - integration-basic
-    - integration-full
-    - performance
-    - training-convergence
