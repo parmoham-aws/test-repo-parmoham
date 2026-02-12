@@ -8,7 +8,7 @@
 # Runner types:
 #   ubuntu-latest  → GitHub-hosted (lint, fast CPU tests)
 #   neuron.cpu     → Self-hosted EC2 with Neuron SDK (CPU-only tests)
-#   neuron         → Kaizen proxy for Trainium/Inferentia hardware tests
+#   neuron         → Self-hosted EC2 proxy for Trainium/Inferentia hardware tests
 #
 # Fan-out pattern: each suite becomes its own GitHub Actions job
 # with its own runs-on label, running in parallel.
@@ -105,7 +105,7 @@ test_suites:
       - "pytest tests/torch_neuronx/unit -v"
 
   # -------------------------------------------------------------------------
-  # Tier 3: Integration Tests (Trainium via Kaizen proxy)
+  # Tier 3: Integration Tests (Trainium hardware)
   # -------------------------------------------------------------------------
   integration-basic:
     description: "Basic integration tests on Trainium"

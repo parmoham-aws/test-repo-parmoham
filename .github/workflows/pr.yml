@@ -12,7 +12,7 @@ name: PR Validation
 # Runner types:
 #   ubuntu-latest  → GitHub-hosted (lint, fast CPU tests)
 #   neuron.cpu     → Self-hosted EC2 with Neuron SDK (CPU-only, FUTURE)
-#   neuron         → Kaizen proxy for Trainium/Inferentia hardware (FUTURE)
+#   neuron         → Self-hosted EC2 proxy for Trainium/Inferentia hardware (FUTURE)
 # =============================================================================
 
 on:
@@ -432,7 +432,7 @@ jobs:
   #       run: pytest tests/torch_neuronx/unit -v
 
   # ---------------------------------------------------------------------------
-  # Tier 3: Integration Basic (Kaizen proxy - FUTURE)
+  # Tier 3: Integration Basic (Trainium hardware - FUTURE)
   # ---------------------------------------------------------------------------
   # integration-basic:
   #   name: "Integration Tests (basic)"
@@ -449,7 +449,7 @@ jobs:
   #       run: pytest tests/integration/basic -v --tb=long
 
   # ---------------------------------------------------------------------------
-  # Tier 4: Integration Full (Kaizen proxy - FUTURE)
+  # Tier 4: Integration Full (Trainium hardware - FUTURE)
   # ---------------------------------------------------------------------------
   # integration-full:
   #   name: "Integration Tests (full)"
