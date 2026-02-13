@@ -39,7 +39,7 @@ jobs:
   # ============================================
   pr-size-check:
     name: PR Size Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
@@ -64,7 +64,7 @@ jobs:
 
   changed-files:
     name: Detect Changed Files
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     if: github.event_name == 'pull_request'
     outputs:
       python: ${{ steps.changes.outputs.python }}

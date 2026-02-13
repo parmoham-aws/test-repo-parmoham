@@ -19,7 +19,7 @@ concurrency:
 jobs:
   unit-tests:
     name: Python Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     strategy:
       fail-fast: false
       matrix:
@@ -50,7 +50,7 @@ jobs:
 
   cpp-build-check:
     name: C++ Build Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

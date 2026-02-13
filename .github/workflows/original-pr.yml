@@ -45,7 +45,7 @@ jobs:
   # ===========================================================================
   changed-files:
     name: Detect Changes
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     outputs:
       files_json: ${{ steps.changes.outputs.all_changed_files }}
       any_changed: ${{ steps.changes.outputs.any_changed }}
@@ -73,7 +73,7 @@ jobs:
   runner-determinator:
     name: Determine Tests
     needs: [changed-files]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     outputs:
       # Per-suite boolean outputs drive conditional fan-out jobs
       run_lint: ${{ steps.determine.outputs.run_lint }}
@@ -372,7 +372,7 @@ jobs:
     name: "Lint"
     needs: [runner-determinator]
     if: needs.runner-determinator.outputs.run_lint == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -399,7 +399,7 @@ jobs:
     name: "Unit Tests (fast)"
     needs: [runner-determinator]
     if: needs.runner-determinator.outputs.run_unit_fast == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -472,7 +472,7 @@ jobs:
     name: PR Summary
     needs: [changed-files, runner-determinator, lint, unit-fast]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - name: Generate summary
         env:
