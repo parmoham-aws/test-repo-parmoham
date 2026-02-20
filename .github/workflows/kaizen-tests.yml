@@ -52,7 +52,10 @@ jobs:
   # ============================================
   kaizen-torch-unit-tests:
     name: Kaizen Torch Unit Tests
-    runs-on: [self-hosted, linux, neuron, neuron.build-image]
+    runs-on:
+      - self-hosted
+      - linux
+      - neuron
     timeout-minutes: 120
 
     steps:
@@ -87,7 +90,10 @@ jobs:
   # ============================================
   kaizen-aten-unit-tests:
     name: Kaizen ATen Unit Tests
-    runs-on: [self-hosted, linux, neuron, neuron.build-image]
+    runs-on:
+      - self-hosted
+      - linux
+      - neuron
     timeout-minutes: 240
 
     steps:
