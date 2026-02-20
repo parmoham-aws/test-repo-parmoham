@@ -75,14 +75,17 @@ jobs:
 
       - name: Install Test Dependencies
         run: |
-          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-cov
+          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
 
       - name: Run Torch Unit Tests
+        env:
+          NEURON_LAUNCH_BLOCKING: "1"
         run: |
           echo "============================================="
           echo "         RUNNING TORCH UNIT TESTS            "
           echo "============================================="
-          pytest tests/ -v --ignore=tests/neuron --ignore=tests/aten -x --tb=short || echo "Tests completed"
+          mkdir -p outputs/test-reports
+          ./tools/run-test-parallel tests/ --skip-distributed --coverage --json-report --report-dir=outputs/test-reports || echo "Tests completed"
           echo "============================================="
 
   # ============================================
@@ -112,7 +115,7 @@ jobs:
 
       - name: Install Test Dependencies
         run: |
-          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
+          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
 
       - name: Run ATen Unit Tests
         env:
