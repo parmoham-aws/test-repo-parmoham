@@ -15,8 +15,9 @@ name: Kaizen Neuron Tests
 #   - pull.yml uses Docker-on-EC2 (ECR login → docker pull → docker run)
 #   - This file uses Kaizen (direct commands dispatched to EKS containers)
 #
-# IMPORTANT: Each `run:` step becomes a separate Kaizen workload.
-#   Split steps for better isolation, debuggability, and timeout handling.
+# IMPORTANT: Each `run:` step becomes a separate Kaizen workload (fresh container).
+#   State (installed packages, files) does NOT persist between steps.
+#   Combine pip install + test execution in the same `run:` block.
 
 on:
   pull_request:
@@ -73,14 +74,11 @@ jobs:
           neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
           echo "============================================="
 
-      - name: Install Test Dependencies
-        run: |
-          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
-
-      - name: Run Torch Unit Tests
+      - name: Install Dependencies and Run Torch Unit Tests
         env:
           NEURON_LAUNCH_BLOCKING: "1"
         run: |
+          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
           echo "============================================="
           echo "         RUNNING TORCH UNIT TESTS            "
           echo "============================================="
@@ -113,14 +111,11 @@ jobs:
           neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
           echo "============================================="
 
-      - name: Install Test Dependencies
-        run: |
-          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
-
-      - name: Run ATen Unit Tests
+      - name: Install Dependencies and Run ATen Unit Tests
         env:
           NEURON_LAUNCH_BLOCKING: "1"
         run: |
+          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
           echo "============================================="
           echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
