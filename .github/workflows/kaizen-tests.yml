@@ -1,4 +1,3 @@
-
 name: Kaizen Neuron Tests
 
 # Runs Neuron tests via Kaizen EKS proxy on trn1.32xlarge instances.
@@ -15,6 +14,9 @@ name: Kaizen Neuron Tests
 # Key difference from pull.yml:
 #   - pull.yml uses Docker-on-EC2 (ECR login → docker pull → docker run)
 #   - This file uses Kaizen (direct commands dispatched to EKS containers)
+#
+# IMPORTANT: Each `run:` step becomes a separate Kaizen workload.
+#   Split steps for better isolation, debuggability, and timeout handling.
 
 on:
   pull_request:
@@ -44,9 +46,6 @@ concurrency:
   group: kaizen-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
-env:
-  IMAGE_URI: 624280435858.dkr.ecr.us-west-2.amazonaws.com/golden_runner_images:kaizen-test
-
 jobs:
   # ============================================
   # Torch Unit Tests via Kaizen (trn1.32xlarge)
@@ -63,24 +62,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Torch Unit Tests
+      - name: Print Neuron Info
         run: |
           echo "============================================="
           echo "       KAIZEN TORCH UNIT TESTS               "
           echo "  (via Kaizen on trn1.32xlarge EKS cluster)  "
           echo "============================================="
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
 
-          echo "Python version:" && python3 --version
-          echo "PyTorch version:" && python3 -c "import torch; print(torch.__version__)"
-          echo ""
-
-          echo "Installing test dependencies..."
+      - name: Install Test Dependencies
+        run: |
           pip install pytest pytest-xdist pytest-html pytest-json-report pytest-cov
 
-          echo ""
-          echo "Running Torch unit tests..."
+      - name: Run Torch Unit Tests
+        run: |
+          echo "============================================="
+          echo "         RUNNING TORCH UNIT TESTS            "
+          echo "============================================="
           pytest tests/ -v --ignore=tests/neuron --ignore=tests/aten -x --tb=short || echo "Tests completed"
-
           echo "============================================="
 
   # ============================================
@@ -98,39 +100,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Print Neuron Info
+        run: |
+          echo "============================================="
+          echo "       NEURON ENVIRONMENT INFO               "
+          echo "============================================="
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
+
+      - name: Install Test Dependencies
+        run: |
+          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
+
       - name: Run ATen Unit Tests
         env:
-          PYTEST_ARGS: "${{ github.event.inputs.test_path }}"
           NEURON_LAUNCH_BLOCKING: "1"
         run: |
           echo "============================================="
-          echo "         KAIZEN ATEN UNIT TESTS               "
-          echo "  (via Kaizen on trn1.32xlarge EKS cluster)  "
+          echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
-
-          echo "Python version:" && python3 --version
-          echo "PyTorch version:" && python3 -c "import torch; print(torch.__version__)"
-          echo ""
-          echo "--- Neuron Device Info ---"
-          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
-          echo ""
-
-          echo "Installing test dependencies..."
-          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
-
-          echo ""
-          echo "Running ATen unit tests..."
           mkdir -p outputs/test-reports
-
-          TEST_PATH="${PYTEST_ARGS:-}"
-          if [ -n "$TEST_PATH" ]; then
-            echo "Running specific tests: $TEST_PATH"
-            ./tools/run-test-parallel "$TEST_PATH" --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
-          else
-            echo "Running all ATen unit tests..."
-            ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
-          fi
-
+          ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
           echo "============================================="
 
       - name: Upload Test Results
