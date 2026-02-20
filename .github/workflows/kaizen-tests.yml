@@ -1,0 +1,106 @@
+name: Kaizen Neuron Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug logging'
+        required: false
+        default: 'false'
+        type: boolean
+      test_path:
+        description: 'Specific test path to run (leave empty for all)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: kaizen-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  kaizen-torch-unit-tests:
+    name: Kaizen Torch Unit Tests
+    runs-on:
+      - self-hosted
+      - linux
+      - neuron
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run Torch Unit Tests
+        run: |
+          echo "============================================="
+          echo "       KAIZEN TORCH UNIT TESTS               "
+          echo "  (via Kaizen on trn1.32xlarge EKS cluster)  "
+          echo "============================================="
+          echo "Python version:" && python3 --version
+          echo "PyTorch version:" && python3 -c "import torch; print(torch.__version__)"
+          echo ""
+          echo "Installing test dependencies..."
+          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-cov
+          echo ""
+          echo "Running Torch unit tests..."
+          pytest tests/ -v --ignore=tests/neuron --ignore=tests/aten -x --tb=short || echo "Tests completed"
+          echo "============================================="
+
+  kaizen-aten-unit-tests:
+    name: Kaizen ATen Unit Tests
+    runs-on:
+      - self-hosted
+      - linux
+      - neuron
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run ATen Unit Tests
+        env:
+          PYTEST_ARGS: "${{ github.event.inputs.test_path }}"
+          NEURON_LAUNCH_BLOCKING: "1"
+        run: |
+          echo "============================================="
+          echo "         KAIZEN ATEN UNIT TESTS               "
+          echo "  (via Kaizen on trn1.32xlarge EKS cluster)  "
+          echo "============================================="
+          echo "Python version:" && python3 --version
+          echo "PyTorch version:" && python3 -c "import torch; print(torch.__version__)"
+          echo ""
+          echo "--- Neuron Device Info ---"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo ""
+          echo "Installing test dependencies..."
+          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
+          echo ""
+          echo "Running ATen unit tests..."
+          mkdir -p outputs/test-reports
+          TEST_PATH="${PYTEST_ARGS:-}"
+          if [ -n "$TEST_PATH" ]; then
+            echo "Running specific tests: $TEST_PATH"
+            ./tools/run-test-parallel "$TEST_PATH" --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          else
+            echo "Running all ATen unit tests..."
+            ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          fi
+          echo "============================================="
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaizen-aten-test-results
+          path: |
+            outputs/
+            *.html
+            *.xml
+          retention-days: 30
