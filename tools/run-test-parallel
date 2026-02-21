@@ -77,7 +77,8 @@ validate_dependencies() {
 # Get neuron core count
 get_neuron_cores() {
     local cores
-    cores=$("${RUNNER[@]}" -c "
+    # Run from /tmp to avoid local torch_neuronx/ directory shadowing the installed package
+    cores=$(cd /tmp && "${RUNNER[@]}" -c "
 import json
 import subprocess
 from torch_neuronx.utils import get_worker_multiplier
