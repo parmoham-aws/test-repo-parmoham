@@ -79,6 +79,8 @@ jobs:
           NEURON_LAUNCH_BLOCKING: "1"
         run: |
           pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
+          # Fix: ensure installed torch_neuronx (with _C.so) takes priority over local source directory
+          export PYTHONPATH=$(python3 -c "import site; print(':'.join(site.getsitepackages()))")
           echo "============================================="
           echo "         RUNNING TORCH UNIT TESTS            "
           echo "============================================="
@@ -116,6 +118,8 @@ jobs:
           NEURON_LAUNCH_BLOCKING: "1"
         run: |
           pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
+          # Fix: ensure installed torch_neuronx (with _C.so) takes priority over local source directory
+          export PYTHONPATH=$(python3 -c "import site; print(':'.join(site.getsitepackages()))")
           echo "============================================="
           echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
