@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 env:
   AWS_DEFAULT_REGION: us-west-2
-  IMAGE_URI: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:neuron-training-torch-neuronx
+  IMAGE_URI: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:joshrj-aten1-kaizen
 jobs:
   hello-world:
     name: Hello World Smoke Test
