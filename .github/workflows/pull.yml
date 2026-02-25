@@ -146,7 +146,7 @@ jobs:
   # ATen Unit Tests (trn1.32xlarge - Neuron, in container)
   # ============================================
   aten-unit-tests:
-    name: Kaizen ATen Unit Tests
+    name: ATen Unit Tests (trn1)
     runs-on:
       - self-hosted
       - linux
@@ -157,37 +157,93 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: ECR Login
+        run: |
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin 624280435858.dkr.ecr.us-west-2.amazonaws.com
+          echo "ECR login successful"
+
+      - name: Pull Docker Image
+        run: |
+          echo "Pulling Docker image: $DOCKER_IMAGE"
+          docker pull "$DOCKER_IMAGE"
+
       - name: Print Neuron Info
         run: |
           echo "============================================="
-          echo "       NEURON ENVIRONMENT INFO               "
+          echo "       NEURON HOST INFO (trn1.32xlarge)      "
           echo "============================================="
-          python3 --version
-          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
-          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          /opt/aws/neuron/bin/neuron-ls || neuron-ls || echo "neuron-ls not available on host"
           echo "============================================="
 
-      - name: Install Dependencies and Run ATen Unit Tests
+      - name: Run ATen Unit Tests in Container
         env:
-          NEURON_LAUNCH_BLOCKING: "1"
+          PYTEST_ARGS: "${{ github.event.inputs.test_path }}"
         run: |
-          # New image has repo at /opt/torch-neuronx (not /workspace/private-neuron-integration-dev)
-          cd /opt/torch-neuronx
-          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
           echo "============================================="
           echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
-          mkdir -p outputs/test-reports
-          ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          # Mount Neuron devices into container
+          NEURON_DEVICES=""
+          for i in $(seq 0 15); do
+            if [ -e "/dev/neuron$i" ]; then
+              NEURON_DEVICES="$NEURON_DEVICES --device=/dev/neuron$i"
+            fi
+          done
+          echo "Neuron devices: $NEURON_DEVICES"
+
+          docker run --rm \
+            $NEURON_DEVICES \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            -e GITHUB_ACTIONS=true \
+            -e GITHUB_WORKSPACE=/workspace \
+            -e NEURON_LAUNCH_BLOCKING=1 \
+            "$DOCKER_IMAGE" \
+            bash -c "
+              echo 'Python version:' && python3 --version
+              echo 'PyTorch version:' && python3 -c 'import torch; print(torch.__version__)'
+              echo ''
+              echo '--- Neuron Device Info (in container) ---'
+              neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo 'neuron-ls not available'
+              echo ''
+              echo 'Installing test dependencies...'
+              pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
+              echo ''
+              echo 'Running ATen unit tests...'
+              mkdir -p outputs/test-reports
+              TEST_PATH='${PYTEST_ARGS:-}'
+              if [ -n \"\$TEST_PATH\" ]; then
+                echo \"Running specific tests: \$TEST_PATH\"
+                ./tools/run-test-parallel \"\$TEST_PATH\" --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+              else
+                echo 'Running all ATen unit tests...'
+                ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+              fi
+            "
           echo "============================================="
 
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kaizen-aten-test-results
+          name: aten-test-results
           path: |
             outputs/
             *.html
             *.xml
           retention-days: 30
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "============================================="
+          echo "              TEST SUMMARY                   "
+          echo "============================================="
+          if [ -f outputs/test-reports/report.json ]; then
+            echo "Test report generated successfully"
+            jq '.summary' outputs/test-reports/report.json 2>/dev/null || echo "Could not parse report"
+          else
+            echo "No test report found"
+          fi
+          echo "============================================="
