@@ -14,20 +14,21 @@ concurrency:
   cancel-in-progress: true
 env:
   AWS_DEFAULT_REGION: us-west-2
+  IMAGE_URI: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:neuron-training-torch-neuronx
 jobs:
-  hello-world-ec2:
-    name: Hello World Smoke Test (EC2)
-    runs-on: [self-hosted, linux, neuron]
+  hello-world:
+    name: Hello World Smoke Test
+    runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     steps:
       - name: Smoke Test
         run: |
-          echo "Hello from EC2 runner!"
-
+          echo "Hello from Kaizen EKS container!"
           echo "Hostname: $(hostname)"
           echo "Kernel: $(uname -r)"
           echo "PWD: $(pwd)"
           echo "Python: $(python3 --version 2>&1 || echo 'not found')"
-
+          echo "Workspace contents:"
+          ls -la /workspace/ || echo "No /workspace"
           A=1
           B=2
           C=$((A + B))
@@ -38,10 +39,9 @@ jobs:
             echo "FAIL"
             exit 1
           fi
-
-  aten-unit-tests-ec2:
-    name: ATen Unit Tests (EC2 trn1)
-    runs-on: [self-hosted, linux, neuron]
+  aten-unit-tests:
+    name: ATen Unit Tests (trn1)
+    runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     timeout-minutes: 240
     steps:
       - name: Checkout
@@ -57,9 +57,7 @@ jobs:
           python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
           neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
           echo "============================================="
-          cd /opt/torch-neuronx
           pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
-
           echo "============================================="
           echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
