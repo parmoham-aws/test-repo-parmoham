@@ -14,6 +14,9 @@ concurrency:
   cancel-in-progress: true
 env:
   AWS_DEFAULT_REGION: us-west-2
+  # Base image built by build-base-image.yml workflow
+  # To update: run "Build Base Image" workflow with desired tag, then update here
+  IMAGE_URI: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:latest.good
 jobs:
   hello-world:
     name: Hello World Smoke Test
