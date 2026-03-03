@@ -1,9 +1,10 @@
 name: Nightly Base Image Build
 
+# This workflow is dispatched by nightly-dispatcher.yml on main.
+# Each branch has its own copy with its own build logic and Dockerfile.
+# NO schedule here — the dispatcher handles scheduling.
 on:
-  schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC daily
-  workflow_dispatch:       # Manual trigger for testing
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,6 +32,7 @@ jobs:
           echo "  Nightly Base Image Build"
           echo "  Repo: $REPO_NAME"
           echo "  Stage: $STAGE"
+          echo "  Branch: ${{ github.ref_name }}"
           echo "  Date: $(date -u)"
           echo "  Job ID: ${{ github.job }}"
           echo "  Run ID: ${{ github.run_id }}"
@@ -94,6 +96,7 @@ jobs:
           echo "========================================="
           echo "  Nightly Build Results"
           echo "========================================="
+          echo "  Branch: ${{ github.ref_name }}"
           echo "  build-base: ${{ needs.build-base.result }}"
           echo "  base_image: ${{ needs.build-base.outputs.base_image }}"
           echo "========================================="
