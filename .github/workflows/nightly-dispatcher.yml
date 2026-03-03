@@ -1,0 +1,54 @@
+name: Nightly Dispatcher
+
+# This workflow lives ONLY on main. It dispatches nightly.yml on each configured branch.
+# The schedule runs nightly; workflow_dispatch allows manual triggering from the UI.
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: 'Comma-separated branches to build (empty = all configured)'
+        required: false
+        default: ''
+
+permissions:
+  actions: write    # Required to dispatch workflows
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch nightly on ${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [nightly]  # Add more branches here as needed, e.g. [nightly, main, feature-x]
+    steps:
+      - name: Dispatch nightly.yml on ${{ matrix.branch }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check if user specified specific branches via workflow_dispatch input
+            const inputBranches = '${{ github.event.inputs.branches }}'.trim();
+            if (inputBranches) {
+              const requested = inputBranches.split(',').map(b => b.trim());
+              if (!requested.includes('${{ matrix.branch }}')) {
+                console.log('Skipping ${{ matrix.branch }} — not in requested branches: ' + inputBranches);
+                return;
+              }
+            }
+
+            console.log('Dispatching nightly.yml on branch: ${{ matrix.branch }}');
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'nightly.yml',
+                ref: '${{ matrix.branch }}'
+              });
+              console.log('✓ Successfully dispatched nightly.yml on ${{ matrix.branch }}');
+            } catch (error) {
+              console.error('✗ Failed to dispatch on ${{ matrix.branch }}: ' + error.message);
+              core.setFailed('Failed to dispatch nightly on ${{ matrix.branch }}: ' + error.message);
+            }

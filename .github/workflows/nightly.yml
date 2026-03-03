@@ -1,0 +1,27 @@
+name: Nightly Base Image Build
+
+# This stub exists on main so GitHub registers the workflow for dispatch.
+# The actual build logic lives on each branch's own copy of nightly.yml.
+# Dispatched by nightly-dispatcher.yml with --ref <branch>.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stub:
+    name: Main branch stub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Info
+        run: |
+          echo "========================================="
+          echo "  This is the main branch stub."
+          echo "  Real nightly builds run on feature branches."
+          echo "  Use nightly-dispatcher.yml to trigger builds"
+          echo "  on specific branches."
+          echo ""
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "========================================="
