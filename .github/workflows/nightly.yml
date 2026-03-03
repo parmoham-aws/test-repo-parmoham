@@ -3,86 +3,46 @@ name: Nightly Base Image Build
 # This workflow is dispatched by nightly-dispatcher.yml on main.
 # Each branch has its own copy with its own build logic and Dockerfile.
 # NO schedule here — the dispatcher handles scheduling.
+#
+# The DDB polling logic runs on the EC2 instance during boot (user data script),
+# NOT in this workflow file. The EC2 sets NIGHTLY_IMAGE_URI env var when ready.
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  REPO_NAME: private-neuron-integration-dev
-  STAGE: alpha
-  TAG_PREFIX: integration-dev
-  BASE_TARGET: nightly-base
-
 jobs:
   # ── Job 1: Build Base Image ────────────────────────────────
-  # The neuron.build-nightly label triggers the Nightly Image Trigger Lambda
-  # which starts the CodeBuild. The runner just polls DDB for the result.
+  # The neuron.build-nightly label triggers:
+  #   1. Webhook → Nightly Image Trigger Lambda → CodeBuild (starts the build)
+  #   2. Scale-up Lambda → EC2 runner (with DDB polling in user data)
+  # By the time the runner picks up this job, the image is already being built
+  # and the EC2 user data script is polling DDB for completion.
   build-base:
     name: Build Nightly Base Image
     runs-on: [self-hosted, linux, neuron.build-nightly]
     timeout-minutes: 120
     outputs:
-      base_image: ${{ steps.wait.outputs.image_uri }}
+      base_image: ${{ steps.result.outputs.image_uri }}
     steps:
-      - name: Log build info
+      - name: Get nightly image URI
+        id: result
         run: |
           echo "========================================="
           echo "  Nightly Base Image Build"
-          echo "  Repo: $REPO_NAME"
-          echo "  Stage: $STAGE"
           echo "  Branch: ${{ github.ref_name }}"
-          echo "  Date: $(date -u)"
-          echo "  Job ID: ${{ github.job }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
-
-      - name: Wait for nightly base image
-        id: wait
-        run: |
-          echo "Waiting for nightly base image build..."
-          echo "The Nightly Image Trigger Lambda was invoked by the webhook"
-          echo "and is building the image via CodeBuild. Polling DDB for status..."
-
-          JOB_ID="${{ github.run_id }}"
-          TABLE="NeuronGithubCI-JobImageMapping-${STAGE}"
-          MAX_WAIT=7200  # 2 hours max
-          ELAPSED=0
-          INTERVAL=30
-
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
-            ITEM=$(aws dynamodb get-item \
-              --table-name "$TABLE" \
-              --key "{\"job_id\":{\"S\":\"$JOB_ID\"}}" \
-              --query 'Item' --output json 2>/dev/null || echo '{}')
-
-            STATUS=$(echo "$ITEM" | jq -r '.status.S // "PENDING"')
-            echo "[$(date -u '+%H:%M:%S')] Build status: $STATUS (elapsed: ${ELAPSED}s)"
-
-            case "$STATUS" in
-              SUCCEEDED)
-                IMAGE_URI=$(echo "$ITEM" | jq -r '.image_uri.S')
-                echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-                echo ""
-                echo "✓ Nightly base image ready: $IMAGE_URI"
-                exit 0
-                ;;
-              FAILED)
-                echo ""
-                echo "::error::Nightly base image build FAILED"
-                REQUEST_ID=$(echo "$ITEM" | jq -r '.image_request_id.S // "unknown"')
-                echo "Request ID: $REQUEST_ID"
-                exit 1
-                ;;
-            esac
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          echo "::error::Timed out waiting for nightly base image build (${MAX_WAIT}s)"
-          exit 1
+          echo ""
+          echo "NIGHTLY_IMAGE_URI=${NIGHTLY_IMAGE_URI:-not set}"
+          if [ -n "$NIGHTLY_IMAGE_URI" ]; then
+            echo "image_uri=$NIGHTLY_IMAGE_URI" >> $GITHUB_OUTPUT
+            echo "✓ Nightly base image: $NIGHTLY_IMAGE_URI"
+          else
+            echo "::warning::NIGHTLY_IMAGE_URI not set — EC2 user data may still be polling"
+            echo "Check /var/log/runner-setup.log on the EC2 instance for details"
+          fi
 
   # ── Job 2: Report ──────────────────────────────────────────
   report:
