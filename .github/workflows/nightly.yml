@@ -1,0 +1,99 @@
+name: Nightly Base Image Build
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+  workflow_dispatch:       # Manual trigger for testing
+
+permissions:
+  contents: read
+
+env:
+  REPO_NAME: private-neuron-integration-dev
+  STAGE: alpha
+  TAG_PREFIX: integration-dev
+  BASE_TARGET: nightly-base
+
+jobs:
+  # ── Job 1: Build Base Image ────────────────────────────────
+  # The neuron.build-nightly label triggers the Nightly Image Trigger Lambda
+  # which starts the CodeBuild. The runner just polls DDB for the result.
+  build-base:
+    name: Build Nightly Base Image
+    runs-on: [self-hosted, linux, neuron.build-nightly]
+    timeout-minutes: 120
+    outputs:
+      base_image: ${{ steps.wait.outputs.image_uri }}
+    steps:
+      - name: Log build info
+        run: |
+          echo "========================================="
+          echo "  Nightly Base Image Build"
+          echo "  Repo: $REPO_NAME"
+          echo "  Stage: $STAGE"
+          echo "  Date: $(date -u)"
+          echo "  Job ID: ${{ github.job }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "========================================="
+
+      - name: Wait for nightly base image
+        id: wait
+        run: |
+          echo "Waiting for nightly base image build..."
+          echo "The Nightly Image Trigger Lambda was invoked by the webhook"
+          echo "and is building the image via CodeBuild. Polling DDB for status..."
+
+          JOB_ID="${{ github.run_id }}"
+          TABLE="NeuronGithubCI-JobImageMapping-${STAGE}"
+          MAX_WAIT=7200  # 2 hours max
+          ELAPSED=0
+          INTERVAL=30
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            ITEM=$(aws dynamodb get-item \
+              --table-name "$TABLE" \
+              --key "{\"job_id\":{\"S\":\"$JOB_ID\"}}" \
+              --query 'Item' --output json 2>/dev/null || echo '{}')
+
+            STATUS=$(echo "$ITEM" | jq -r '.status.S // "PENDING"')
+            echo "[$(date -u '+%H:%M:%S')] Build status: $STATUS (elapsed: ${ELAPSED}s)"
+
+            case "$STATUS" in
+              SUCCEEDED)
+                IMAGE_URI=$(echo "$ITEM" | jq -r '.image_uri.S')
+                echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+                echo ""
+                echo "✓ Nightly base image ready: $IMAGE_URI"
+                exit 0
+                ;;
+              FAILED)
+                echo ""
+                echo "::error::Nightly base image build FAILED"
+                REQUEST_ID=$(echo "$ITEM" | jq -r '.image_request_id.S // "unknown"')
+                echo "Request ID: $REQUEST_ID"
+                exit 1
+                ;;
+            esac
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "::error::Timed out waiting for nightly base image build (${MAX_WAIT}s)"
+          exit 1
+
+  # ── Job 2: Report ──────────────────────────────────────────
+  report:
+    name: Report Results
+    needs: [build-base]
+    if: always()
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Summary
+        run: |
+          echo "========================================="
+          echo "  Nightly Build Results"
+          echo "========================================="
+          echo "  build-base: ${{ needs.build-base.result }}"
+          echo "  base_image: ${{ needs.build-base.outputs.base_image }}"
+          echo "========================================="

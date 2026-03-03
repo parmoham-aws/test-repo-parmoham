@@ -1,5 +1,29 @@
-# Base image
-FROM public.ecr.aws/ubuntu/ubuntu:22.04_stable
+# ============================================================
+# Multi-stage Dockerfile for Neuron CI
+#
+# Stages:
+#   nightly-base  — Dependencies only (OS, Python, Neuron, compiler, build tools)
+#                   Built nightly by the Nightly Image Trigger Lambda
+#   complete      — Full build (base + PyTorch from source + torchax)
+#                   Default target for standalone builds
+#
+# Usage:
+#   Nightly base:  docker build --target nightly-base -t base .
+#   Full build:    docker build -t complete .
+#
+# Internal builds override ARGs via --build-arg for authenticated repos.
+# ============================================================
+
+# ============================================================
+# Stage 1: nightly-base — dependencies only (no repo clone)
+# ============================================================
+FROM public.ecr.aws/ubuntu/ubuntu:22.04_stable AS nightly-base
+
+# Build arguments for authenticated Neuron repos (defaults to public)
+ARG NEURON_APT_REPO=apt.repos.neuron.amazonaws.com
+ARG NEURON_APT_REPO_CREDENTIALS=""
+ARG NEURON_PIP_REPO=https://pip.repos.neuron.amazonaws.com
+ARG NEURON_PIP_REPO_CREDENTIALS=""
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,9 +51,19 @@ RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
 
 # Configure Linux for Neuron repository updates
+# Uses authenticated repo if NEURON_APT_REPO_CREDENTIALS is set, otherwise public
 RUN . /etc/os-release && \
-    echo "deb https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main" | tee /etc/apt/sources.list.d/neuron.list > /dev/null && \
-    wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB | apt-key add -
+    if [ -n "${NEURON_APT_REPO_CREDENTIALS}" ]; then \
+      echo "deb https://${NEURON_APT_REPO_CREDENTIALS}@${NEURON_APT_REPO} ${VERSION_CODENAME} main" \
+        | tee /etc/apt/sources.list.d/neuron.list > /dev/null && \
+      wget -qO - "https://${NEURON_APT_REPO_CREDENTIALS}@${NEURON_APT_REPO}/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB" \
+        | apt-key add -; \
+    else \
+      echo "deb https://${NEURON_APT_REPO} ${VERSION_CODENAME} main" \
+        | tee /etc/apt/sources.list.d/neuron.list > /dev/null && \
+      wget -qO - "https://${NEURON_APT_REPO}/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB" \
+        | apt-key add -; \
+    fi
 
 # Update OS packages
 RUN apt-get update -y
@@ -95,7 +129,12 @@ ENV PATH=/opt/aws/neuron/bin:$PATH
 ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
 
 # Set Neuron repository as additional index (PyPI remains primary)
-RUN python -m pip config set global.extra-index-url https://pip.repos.neuron.amazonaws.com
+# Uses authenticated pip repo if credentials are set
+RUN if [ -n "${NEURON_PIP_REPO_CREDENTIALS}" ]; then \
+      python -m pip config set global.extra-index-url "https://${NEURON_PIP_REPO_CREDENTIALS}@${NEURON_PIP_REPO}"; \
+    else \
+      python -m pip config set global.extra-index-url "${NEURON_PIP_REPO}"; \
+    fi
 
 # Install compiler (will use PyPI for dependencies and Neuron repo for neuronx-cc)
 RUN python -m pip install neuronx-cc==2.23.*
@@ -109,6 +148,25 @@ RUN apt-get update -y && \
 
 # Install Python dependencies for PyTorch build
 RUN python -m pip install cmake ninja
+
+# Clean up authenticated repo credentials from apt sources
+RUN if [ -n "${NEURON_APT_REPO_CREDENTIALS}" ]; then \
+      rm -f /etc/apt/sources.list.d/neuron.list; \
+    fi
+
+# Create and set working directory
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
+# Default command
+CMD ["/bin/bash"]
+
+
+# ============================================================
+# Stage 2: complete — full standalone build (default target)
+# Includes PyTorch from source + torchax
+# ============================================================
+FROM nightly-base AS complete
 
 # Clone PyTorch repository
 RUN git clone https://github.com/pytorch/pytorch /code/pytorch
