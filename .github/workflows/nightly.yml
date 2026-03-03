@@ -4,8 +4,8 @@ name: Nightly Base Image Build
 # Each branch has its own copy with its own build logic and Dockerfile.
 # NO schedule here — the dispatcher handles scheduling.
 #
-# The DDB polling logic runs on the EC2 instance during boot (user data script),
-# NOT in this workflow file. The EC2 sets NIGHTLY_IMAGE_URI env var when ready.
+# The DDB polling script is installed on the EC2 by the user data script.
+# The workflow calls it here so logs appear in GitHub Actions UI.
 on:
   workflow_dispatch:
 
@@ -16,32 +16,30 @@ jobs:
   # ── Job 1: Build Base Image ────────────────────────────────
   # The neuron.build-nightly label triggers:
   #   1. Webhook → Nightly Image Trigger Lambda → CodeBuild (starts the build)
-  #   2. Scale-up Lambda → EC2 runner (with DDB polling in user data)
-  # By the time the runner picks up this job, the image is already being built
-  # and the EC2 user data script is polling DDB for completion.
+  #   2. Scale-up Lambda → EC2 runner (installs polling script via user data)
+  # The workflow step below calls the EC2-installed script to wait for the image.
   build-base:
     name: Build Nightly Base Image
     runs-on: [self-hosted, linux, neuron.build-nightly]
     timeout-minutes: 120
     outputs:
-      base_image: ${{ steps.result.outputs.image_uri }}
+      base_image: ${{ steps.wait.outputs.image_uri }}
     steps:
-      - name: Get nightly image URI
-        id: result
+      - name: Wait for nightly base image
+        id: wait
         run: |
           echo "========================================="
           echo "  Nightly Base Image Build"
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
-          echo ""
-          echo "NIGHTLY_IMAGE_URI=${NIGHTLY_IMAGE_URI:-not set}"
+          # Call the polling script installed by EC2 user data
+          # This blocks until the image build completes (SUCCEEDED/FAILED)
+          # Logs appear here in GitHub Actions UI
+          /opt/neuron-ci/wait-for-nightly-image.sh
+          # After success, read the image URI from environment
           if [ -n "$NIGHTLY_IMAGE_URI" ]; then
             echo "image_uri=$NIGHTLY_IMAGE_URI" >> $GITHUB_OUTPUT
-            echo "✓ Nightly base image: $NIGHTLY_IMAGE_URI"
-          else
-            echo "::warning::NIGHTLY_IMAGE_URI not set — EC2 user data may still be polling"
-            echo "Check /var/log/runner-setup.log on the EC2 instance for details"
           fi
 
   # ── Job 2: Report ──────────────────────────────────────────
