@@ -2,10 +2,11 @@
 # Multi-stage Dockerfile for Neuron CI (torch-neuronx)
 #
 # Stages:
-#   nightly-base  — Dependencies only (OS, Python, Neuron runtime/tools,
-#                   compiler, EFA, cmake, bazel, uv). No repo clones.
-#                   Built nightly by the Nightly Image Trigger Lambda.
-#   complete      — Full build (base + torch-neuronx from source + torch-mlir)
+#   nightly-base  — Everything except torch-neuronx clone/build:
+#                   OS, Python, Neuron runtime/tools/compiler, EFA,
+#                   cmake, bazel, uv, torch-mlir (built from source),
+#                   test deps. Built nightly by the Nightly Image Trigger Lambda.
+#   complete      — Only torch-neuronx clone + build on top of nightly-base.
 #                   Default target for standalone/PR builds.
 #
 # Usage:
@@ -15,11 +16,11 @@
 # Build args (resolved by nightly Lambda from DDB config):
 #   NEURON_APT_REPO_URL  — Full authenticated APT repo URL (https://user:pass@host)
 #   NEURON_PIP_REPO_URL  — Full authenticated PIP repo URL (https://user:pass@host)
-#   GITHUB_TOKEN         — GitHub token for cloning private repos (complete stage only)
+#   GITHUB_TOKEN         — GitHub token for cloning private repos (torch-mlir in base, torch-neuronx in complete)
 # ============================================================
 
 # ============================================================
-# Stage 1: nightly-base — all dependencies, no repo clones
+# Stage 1: nightly-base — everything except torch-neuronx
 # ============================================================
 FROM public.ecr.aws/ubuntu/ubuntu:22.04_stable AS nightly-base
 
@@ -27,6 +28,7 @@ FROM public.ecr.aws/ubuntu/ubuntu:22.04_stable AS nightly-base
 # Format: https://user:pass@hostname (no credentials in Dockerfile)
 ARG NEURON_APT_REPO_URL=""
 ARG NEURON_PIP_REPO_URL=""
+ARG GITHUB_TOKEN=""
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -56,8 +58,6 @@ RUN apt-get update && apt-get install -y \
 # Add authenticated repo if URL provided, otherwise use public
 RUN . /etc/os-release && \
     if [ -n "${NEURON_APT_REPO_URL}" ]; then \
-      echo "deb ${NEURON_APT_REPO_URL} ${VERSION_CODENAME} main" \
-        > /etc/apt/sources.list.d/neuron.list && \
       REPO_HOST=$(echo "${NEURON_APT_REPO_URL}" | sed 's|https://[^@]*@||') && \
       REPO_CREDS=$(echo "${NEURON_APT_REPO_URL}" | sed 's|https://||;s|@.*||') && \
       wget -qO - "https://${REPO_CREDS}@${REPO_HOST}/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB" \
@@ -65,8 +65,6 @@ RUN . /etc/os-release && \
       echo "deb [signed-by=/usr/share/keyrings/neuron-keyring.gpg] ${NEURON_APT_REPO_URL} ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/neuron.list; \
     else \
-      echo "deb https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main" \
-        > /etc/apt/sources.list.d/neuron.list && \
       wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB \
         | gpg --dearmor -o /usr/share/keyrings/neuron-keyring.gpg && \
       echo "deb [signed-by=/usr/share/keyrings/neuron-keyring.gpg] https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main" \
@@ -159,49 +157,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ccache clang lld llvm libstdc++-12-dev \
     && rm -rf /var/lib/apt/lists/* && apt-get clean
 
-# ── Environment ──────────────────────────────────────────────
-ENV PATH="/opt/aws/neuron/bin:$PATH"
-ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
-
-# Clean up authenticated repo URLs from apt sources (security)
-RUN if [ -n "${NEURON_APT_REPO_URL}" ]; then \
-      rm -f /etc/apt/sources.list.d/neuron.list; \
-    fi
-
-RUN mkdir -p /workspace
-WORKDIR /workspace
-CMD ["/bin/bash"]
-
-
-# ============================================================
-# Stage 2: complete — full build with torch-neuronx + torch-mlir
-# ============================================================
-FROM nightly-base AS complete
-
-ARG GITHUB_TOKEN=""
-
-# ── Clone torch-neuronx ──────────────────────────────────────
-RUN cd /opt && \
-    if [ -n "${GITHUB_TOKEN}" ]; then \
-      git clone https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-neuronx.git; \
-    else \
-      git clone https://github.com/aws-neuron/torch-neuronx.git; \
-    fi
-
-RUN chmod +x /opt/torch-neuronx/tools/* && \
-    chmod +x /opt/torch-neuronx/tests/pytorch_tests/*.sh || true
-
-# ── Set up uv venv ───────────────────────────────────────────
-RUN uv venv /opt/torch-neuronx/.venv
-ENV UV_PROJECT_ENVIRONMENT=/opt/torch-neuronx/.venv
-ENV PATH="/opt/torch-neuronx/.venv/bin:/opt/aws/neuron/bin:$PATH"
-ENV NRT_LOCAL_PATH="/opt/aws/neuron"
-
-RUN uv pip install -U pip
-
-# ── Install test dependencies ────────────────────────────────
-RUN uv pip install einops boto3
-
 # ── Clone and build torch-mlir ───────────────────────────────
 RUN cd /opt && \
     if [ -n "${GITHUB_TOKEN}" ]; then \
@@ -219,10 +174,59 @@ RUN cd /opt && \
     TORCH_MLIR_ENABLE_JIT_IR_IMPORTER=0 \
     TORCH_MLIR_ENABLE_ONLY_MLIR_PYTHON_BINDINGS=1 \
     python3 -m pip wheel -v --no-build-isolation -w /opt/torch-mlir-wheels . && \
-    uv pip install --no-cache-dir --no-deps /opt/torch-mlir-wheels/neuron_torch_mlir-*.whl
+    pip3 install --no-cache-dir --no-deps /opt/torch-mlir-wheels/neuron_torch_mlir-*.whl
 
-# Clean up torch-mlir build artifacts
+# Clean up torch-mlir build artifacts to reduce image size
 RUN cd /opt/torch-mlir && rm -rf build/ .git/ externals/ && pip3 cache purge
+
+# ── Set up uv venv for torch-neuronx ─────────────────────────
+# Create the venv in nightly-base so complete stage just clones + builds
+RUN mkdir -p /opt/torch-neuronx && \
+    uv venv /opt/torch-neuronx/.venv
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/torch-neuronx/.venv
+ENV PATH="/opt/torch-neuronx/.venv/bin:/opt/aws/neuron/bin:$PATH"
+ENV NRT_LOCAL_PATH="/opt/aws/neuron"
+ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
+
+RUN uv pip install -U pip
+
+# ── Install test dependencies ────────────────────────────────
+RUN uv pip install einops boto3
+
+# ── Clean up ─────────────────────────────────────────────────
+# Remove authenticated repo URLs from apt sources (security)
+RUN rm -f /etc/apt/sources.list.d/neuron.list 2>/dev/null; true
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["/bin/bash"]
+
+
+# ============================================================
+# Stage 2: complete — only torch-neuronx clone + build
+# ============================================================
+FROM nightly-base AS complete
+
+ARG GITHUB_TOKEN=""
+
+# ── Clone torch-neuronx ──────────────────────────────────────
+RUN cd /opt && \
+    if [ -d torch-neuronx/.venv ]; then \
+      VENV_BAK=$(mktemp -d) && mv torch-neuronx/.venv "$VENV_BAK/"; \
+    fi && \
+    if [ -n "${GITHUB_TOKEN}" ]; then \
+      git clone https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-neuronx.git torch-neuronx-src; \
+    else \
+      git clone https://github.com/aws-neuron/torch-neuronx.git torch-neuronx-src; \
+    fi && \
+    # Move cloned files into the existing torch-neuronx dir (preserving .venv)
+    cp -a torch-neuronx-src/. torch-neuronx/ && \
+    rm -rf torch-neuronx-src && \
+    if [ -d "$VENV_BAK/.venv" ]; then mv "$VENV_BAK/.venv" torch-neuronx/; rm -rf "$VENV_BAK"; fi
+
+RUN chmod +x /opt/torch-neuronx/tools/* && \
+    chmod +x /opt/torch-neuronx/tests/pytorch_tests/*.sh || true
 
 # ── Build torch-neuronx ──────────────────────────────────────
 RUN cd /opt/torch-neuronx && \
