@@ -44,34 +44,24 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
   # ── Job 2: Promote to Stable ───────────────────────────────
-  # The neuron.tag-nightly-stable label triggers:
+  # The neuron.tag-stable label triggers:
   #   1. Webhook → Nightly Tagger Lambda → ECR PutImage (tags with -stable)
   #   2. Scale-up Lambda → EC2 runner (verifies tag exists)
-  # The neuron.nightly-image: label passes the image URI to the webhook.
   # The workflow step below calls the EC2-installed verification script.
   promote-to-stable:
     name: Tag as Stable
     needs: [build-base]
     if: success()
-    runs-on: [
-      self-hosted,
-      linux,
-      neuron.tag-nightly-stable,
-      neuron.nightly-image:${{ needs.build-base.outputs.base_image }}
-    ]
+    runs-on: [self-hosted, linux, neuron.tag-stable]
+    env:
+      NIGHTLY_IMAGE_URI: ${{ needs.build-base.outputs.base_image }}
     steps:
       - name: Verify stable tag
         run: |
           echo "========================================="
           echo "  Stable Tagging Verification"
+          echo "  Image: $NIGHTLY_IMAGE_URI"
           echo "========================================="
-          
-          # Extract image URI from the neuron.nightly-image: label
-          # GitHub resolves the expression and includes it in runs-on
-          IMAGE_URI="${{ needs.build-base.outputs.base_image }}"
-          export NIGHTLY_IMAGE_URI="$IMAGE_URI"
-          
-          echo "Image: $NIGHTLY_IMAGE_URI"
           
           # The webhook Lambda has already invoked the Nightly Tagger Lambda
           # asynchronously. We just need to verify the -stable tag exists.
