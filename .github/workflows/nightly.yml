@@ -36,25 +36,51 @@ jobs:
           # Call the polling script installed by EC2 user data
           # This blocks until the image build completes (SUCCEEDED/FAILED)
           # Logs appear here in GitHub Actions UI
-          /opt/neuron-ci/wait-for-nightly-image.sh
-          # After success, read the image URI from environment
-          if [ -n "$NIGHTLY_IMAGE_URI" ]; then
-            echo "image_uri=$NIGHTLY_IMAGE_URI" >> $GITHUB_OUTPUT
-          fi
+          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
+          
+          # Extract IMAGE_URI from the success message
+          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
+          echo "Captured image URI: $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-  # ── Job 2: Report ──────────────────────────────────────────
-  report:
-    name: Report Results
+  # ── Job 2: Promote to Stable ───────────────────────────────
+  promote-to-stable:
+    name: Tag as Stable
     needs: [build-base]
-    if: always()
+    if: success()
     runs-on: [self-hosted, linux]
     steps:
-      - name: Summary
+      - name: Add stable tag
         run: |
-          echo "========================================="
-          echo "  Nightly Build Results"
-          echo "========================================="
-          echo "  Branch: ${{ github.ref_name }}"
-          echo "  build-base: ${{ needs.build-base.result }}"
-          echo "  base_image: ${{ needs.build-base.outputs.base_image }}"
-          echo "========================================="
+          BASE_IMAGE="${{ needs.build-base.outputs.base_image }}"
+          echo "Base image: $BASE_IMAGE"
+          
+          # Extract repository and tag
+          REPO="${BASE_IMAGE%:*}"
+          IMAGE_TAG="${BASE_IMAGE##*:}"
+          REPO_NAME="${REPO##*/}"
+          
+          echo "Repository: $REPO_NAME"
+          echo "Image tag: $IMAGE_TAG"
+          
+          # Create stable tag by appending -stable
+          STABLE_TAG="${IMAGE_TAG}-stable"
+          echo "Stable tag: $STABLE_TAG"
+          
+          # Get the image manifest
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "$REPO_NAME" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'images[0].imageManifest' \
+            --output text \
+            --region us-west-2)
+          
+          # Tag as stable
+          aws ecr put-image \
+            --repository-name "$REPO_NAME" \
+            --image-tag "$STABLE_TAG" \
+            --image-manifest "$MANIFEST" \
+            --region us-west-2
+          
+          echo "✓ Tagged as stable: $STABLE_TAG"
+          echo "Full stable image URI: ${BASE_IMAGE}-stable"
