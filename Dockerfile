@@ -152,32 +152,31 @@ RUN pip install --force-reinstall neuronx_cc neuronx_cc_stubs nki && \
     echo "=== neuronxcc ===" && pip list | grep -i neuron && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -c "import neuronxcc; print('neuronxcc OK')"
 
-# ── torch-mlir build dependencies ────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ccache clang lld llvm libstdc++-12-dev \
-    && rm -rf /var/lib/apt/lists/* && apt-get clean
-
-# ── Clone and build torch-mlir ───────────────────────────────
-RUN cd /opt && \
-    if [ -n "${GITHUB_TOKEN}" ]; then \
-      git clone https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-mlir.git; \
+# ── Install torch-mlir from private release ──────────────────
+# Much faster than building from source (~2 min vs ~30-45 min)
+# Requires GITHUB_TOKEN with access to aws-neuron/torch-mlir releases
+RUN if [ -n "${GITHUB_TOKEN}" ]; then \
+      echo "Installing torch-mlir from private release..." && \
+      PYTHON_TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')" && \
+      PLATFORM="manylinux_2_28_x86_64" && \
+      RELEASE_DATA=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+        "https://api.github.com/repos/aws-neuron/torch-mlir/releases/latest") && \
+      VERSION=$(echo "$RELEASE_DATA" | jq -r '.tag_name') && \
+      echo "Latest torch-mlir release: $VERSION" && \
+      FILENAME=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"torch_mlir.*${PYTHON_TAG}.*${PLATFORM}\")) | .name" | head -1) && \
+      echo "Downloading wheel: $FILENAME" && \
+      ASSET_ID=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name==\"$FILENAME\") | .id") && \
+      curl -L -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        -o "$FILENAME" \
+        "https://api.github.com/repos/aws-neuron/torch-mlir/releases/assets/$ASSET_ID" && \
+      pip3 install --no-cache-dir --no-deps "$FILENAME" && \
+      rm -f "$FILENAME" && \
+      echo "torch-mlir installed successfully from release"; \
     else \
-      git clone https://github.com/aws-neuron/torch-mlir.git; \
-    fi && \
-    cd torch-mlir && \
-    git submodule update --init --recursive && \
-    pip3 install --no-cache-dir -r build-requirements.txt && \
-    mkdir -p /opt/torch-mlir-wheels && \
-    CMAKE_GENERATOR=Ninja \
-    TORCH_MLIR_PYTHON_PACKAGE_VERSION=0.0.1 \
-    TORCH_MLIR_ENABLE_LTC=0 \
-    TORCH_MLIR_ENABLE_JIT_IR_IMPORTER=0 \
-    TORCH_MLIR_ENABLE_ONLY_MLIR_PYTHON_BINDINGS=1 \
-    python3 -m pip wheel -v --no-build-isolation -w /opt/torch-mlir-wheels . && \
-    pip3 install --no-cache-dir --no-deps /opt/torch-mlir-wheels/neuron_torch_mlir-*.whl
-
-# Clean up torch-mlir build artifacts to reduce image size
-RUN cd /opt/torch-mlir && rm -rf build/ .git/ externals/ && pip3 cache purge
+      echo "WARNING: GITHUB_TOKEN not set, skipping torch-mlir installation"; \
+      echo "The nightly-base image will not include torch-mlir"; \
+    fi
 
 # ── Set up uv venv for torch-neuronx ─────────────────────────
 # Create the venv in nightly-base so complete stage just clones + builds
