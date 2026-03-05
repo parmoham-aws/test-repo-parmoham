@@ -57,7 +57,7 @@ jobs:
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      neuron.nightly-image:${{ needs.build-base.outputs.base_image }}
+      "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}"
     ]
     steps:
       - name: Verify stable tag
