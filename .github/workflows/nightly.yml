@@ -1,11 +1,7 @@
-name: Nightly Base Image Build
+name: Test Nightly Stable Tagging
 
-# This workflow is dispatched by nightly-dispatcher.yml on main.
-# Each branch has its own copy with its own build logic and Dockerfile.
-# NO schedule here — the dispatcher handles scheduling.
-#
-# The DDB polling script is installed on the EC2 by the user data script.
-# The workflow calls it here so logs appear in GitHub Actions UI.
+# Temporary test workflow - just tests stable tagging with hardcoded image
+# Will be reverted after successful test
 on:
   workflow_dispatch:
 
@@ -13,51 +9,13 @@ permissions:
   contents: read
 
 jobs:
-  # ── Job 1: Build Base Image ────────────────────────────────
-  # The neuron.build-nightly label triggers:
-  #   1. Webhook → Nightly Image Trigger Lambda → CodeBuild (starts the build)
-  #   2. Scale-up Lambda → EC2 runner (installs polling script via user data)
-  # The workflow step below calls the EC2-installed script to wait for the image.
-  build-base:
-    name: Build Nightly Base Image
-    runs-on: [self-hosted, linux, neuron.build-nightly]
-    timeout-minutes: 120
-    outputs:
-      base_image: ${{ steps.wait.outputs.image_uri }}
-    steps:
-      - name: Wait for nightly base image
-        id: wait
-        run: |
-          echo "========================================="
-          echo "  Nightly Base Image Build"
-          echo "  Branch: ${{ github.ref_name }}"
-          echo "  Run ID: ${{ github.run_id }}"
-          echo "========================================="
-          # Call the polling script installed by EC2 user data
-          # This blocks until the image build completes (SUCCEEDED/FAILED)
-          # Logs appear here in GitHub Actions UI
-          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
-          
-          # Extract IMAGE_URI from the success message
-          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
-          echo "Captured image URI: $IMAGE_URI"
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-
-  # ── Job 2: Promote to Stable ───────────────────────────────
-  # The neuron.tag-nightly-stable label triggers:
-  #   1. Webhook → Nightly Tagger Lambda → ECR PutImage (tags with -stable)
-  #   2. Scale-up Lambda → EC2 runner (verifies tag exists)
-  # The neuron.nightly-image: label passes the image URI to the webhook.
-  # The workflow step below calls the EC2-installed verification script.
   promote-to-stable:
     name: Tag as Stable
-    needs: [build-base]
-    if: success()
     runs-on: [
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}"
+      neuron.nightly-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-20260305-000044
     ]
     steps:
       - name: Verify stable tag
@@ -66,15 +24,12 @@ jobs:
           echo "  Stable Tagging Verification"
           echo "========================================="
           
-          # Extract image URI from the neuron.nightly-image: label
-          # GitHub resolves the expression and includes it in runs-on
-          IMAGE_URI="${{ needs.build-base.outputs.base_image }}"
-          export NIGHTLY_IMAGE_URI="$IMAGE_URI"
+          # Set image URI for verification script
+          export NIGHTLY_IMAGE_URI="882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-20260305-000044"
           
           echo "Image: $NIGHTLY_IMAGE_URI"
           
-          # The webhook Lambda has already invoked the Nightly Tagger Lambda
-          # asynchronously. We just need to verify the -stable tag exists.
+          # Call verification script (installed by updated user data)
           /opt/neuron-ci/verify-stable-tag.sh
           
-          echo "✓ Stable tagging complete"
+          echo "✓ Stable tagging verification complete"
