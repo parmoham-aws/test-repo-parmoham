@@ -62,33 +62,6 @@ jobs:
             echo "::warning::Large PR detected ($TOTAL lines changed). Consider breaking into smaller PRs."
           fi
 
-  changed-files:
-    name: Detect Changed Files
-    runs-on: [self-hosted, linux]
-    if: github.event_name == 'pull_request'
-    outputs:
-      python: ${{ steps.changes.outputs.python }}
-      cpp: ${{ steps.changes.outputs.cpp }}
-      tests: ${{ steps.changes.outputs.tests }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check changed files
-        id: changes
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            python:
-              - '**/*.py'
-            cpp:
-              - '**/*.cpp'
-              - '**/*.h'
-              - '**/*.hpp'
-              - '**/*.cc'
-            tests:
-              - 'tests/**'
-
   # ============================================
   # Torch Unit Tests (c5 - CPU only, in container)
   # ============================================
