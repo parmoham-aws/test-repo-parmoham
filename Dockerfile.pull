@@ -6,136 +6,6 @@
 # Docker images containing torch-neuronx code from pull requests.
 # It uses a pre-built nightly base image to dramatically reduce build time.
 #
-# BUILD TIME COMPARISON:
-# - Full build (Dockerfile.torch-neuronx-complete): 45+ minutes
-# - PR build (this file): 10-15 minutes (only torch-neuronx compilation)
-#
-# BASE IMAGE:
-# Uses the nightly-base stage from private-neuron-integration-dev/Dockerfile
-# which is built nightly and tagged as:
-#   882938390504.dkr.ecr.us-west-2.amazonaws.com:private-neuron-integration-dev-nightly-nightly-base-stable
-#
-# This base image contains:
-# - Ubuntu 22.04 with Python 3.10
-# - Neuron runtime, tools, compiler (neuronx_cc, nki)
-# - torch-mlir (built from aws-neuron/torch-mlir private release)
-# - All build dependencies (cmake, bazel, clang-18, EFA driver)
-# - uv venv at /opt/torch-neuronx/.venv with all Python dependencies
-#
-# WHAT THIS DOCKERFILE ADDS:
-# - Clones torch-neuronx from the PR (using GITHUB_REPOSITORY + HEAD_SHA)
-# - Builds torch-neuronx from the PR code (~10-15 min)
-# - Verifies the installation
-#
-# ============================================================
-# HOW THE PR BUILD WORKFLOW WORKS:
-# ============================================================
-#
-# 1. WEBHOOK DETECTION (webhook/handler.py)
-#    - GitHub sends workflow_job event when PR workflow starts
-#    - Webhook Lambda detects "neuron.build-image" label
-#    - Extracts: job_id, pr_number, head_sha, repo info
-#    - Invokes Image Trigger Lambda asynchronously
-#
-# 2. IMAGE TRIGGER (image_trigger/handler.py)
-#    - Checks for existing build (deduplication by pr_id + head_sha)
-#    - Gets GitHub App installation token
-#    - Encodes token as base64: GITHUB_AUTH_B64 = base64("x-access-token:token")
-#    - Calls NeuronImageBuilder API with build args:
-#      {
-#        "dockerfile_name": "Dockerfile.pull",
-#        "build_args": [
-#          {"name": "GITHUB_AUTH_B64", "value": "eC1hY2Nlc3M..."},
-#          {"name": "PR_NUMBER", "value": "456"},
-#          {"name": "GITHUB_REPOSITORY", "value": "aws-neuron/torch-neuronx"},
-#          {"name": "HEAD_SHA", "value": "abc123..."}
-#        ],
-#        "image_tag": "ci-pr456"
-#      }
-#
-# 3. BUILD TRIGGER (build_trigger_handler.py)
-#    - Uploads Dockerfile.pull to S3
-#    - Generates buildspec.yml with these phases:
-#      
-#      pre_build:
-#        - ECR login
-#        - git clone https://x-access-token@github.com/${GITHUB_REPOSITORY}.git
-#        - git checkout ${HEAD_SHA}
-#        - Sets REPO_NAME env var (e.g., "torch-neuronx")
-#      
-#      build:
-#        - docker buildx build
-#            --build-arg GITHUB_AUTH_B64=${BUILD_ARG_GITHUB_AUTH_B64}
-#            --build-arg PR_NUMBER=${BUILD_ARG_PR_NUMBER}
-#            --build-arg GITHUB_REPOSITORY=${BUILD_ARG_GITHUB_REPOSITORY}
-#            --build-arg HEAD_SHA=${BUILD_ARG_HEAD_SHA}
-#            --build-arg REPO_NAME=${REPO_NAME}
-#            -f Dockerfile.pull
-#            -t ecr:ci-pr456
-#            --push .
-#    
-#    - Starts CodeBuild with S3 source location
-#
-# 4. CODEBUILD EXECUTION (30-45 min total, but only 10-15 for torch-neuronx)
-#    - Runs buildspec phases
-#    - Clones PR code at specific commit (HEAD_SHA)
-#    - Builds Docker image using this Dockerfile
-#    - Pushes to ECR with tag ci-pr{PR_NUMBER}
-#
-# 5. BUILD COMPLETION (build_completion_handler.py)
-#    - Updates DynamoDB: status = "SUCCEEDED"
-#    - EC2 runner polls DynamoDB, finds image ready
-#    - Runner pulls image and executes PR tests
-#
-# ============================================================
-# BUILD ARGUMENTS EXPLAINED:
-# ============================================================
-#
-# GITHUB_AUTH_B64:
-#   Base64-encoded GitHub token in format "x-access-token:token"
-#   Used by CodeBuild buildspec to clone private repos
-#   Never exposed in Dockerfile - only used in buildspec git clone
-#   Example: "eC1hY2Nlc3MtdG9rZW46Z2hwX3h4eHh4eA=="
-#
-# PR_NUMBER:
-#   GitHub pull request number
-#   Used for logging and image tagging (ci-pr{PR_NUMBER})
-#   Example: "456"
-#
-# GITHUB_REPOSITORY:
-#   Full repository path (owner/repo)
-#   Used by buildspec to clone the correct repo
-#   Example: "aws-neuron/torch-neuronx"
-#
-# HEAD_SHA:
-#   Git commit SHA (40 characters)
-#   Used by buildspec to checkout the exact PR commit
-#   Ensures reproducible builds (same SHA = same code)
-#   Example: "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"
-#
-# REPO_NAME:
-#   Directory name of cloned repo (set by buildspec)
-#   Used to COPY the cloned code into the Docker image
-#   Example: "torch-neuronx"
-#
-# ============================================================
-# TESTING NOTES:
-# ============================================================
-#
-# Current test setup uses:
-# - Base image: private-neuron-integration-dev-nightly-nightly-base-stable
-# - Test repo: aws-neuron/torch-neuronx (via private-neuron-integration-dev)
-#
-# The workflow is:
-# 1. Nightly: Build base image with all dependencies
-# 2. PR: Build torch-neuronx from PR code on top of base
-# 3. Runner: Pull PR image and run tests
-#
-# This pattern can be replicated for other repos by:
-# 1. Creating a nightly base image for that repo
-# 2. Creating a Dockerfile.pull that builds only the repo code
-# 3. Configuring the Image Trigger Lambda to use Dockerfile.pull
-#
 # ============================================================
 
 ARG BASE_IMAGE_URI=882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-stable
@@ -148,27 +18,13 @@ ARG GITHUB_REPOSITORY=""
 ARG HEAD_SHA=""
 ARG REPO_NAME=""
 
-# ============================================================
-# APPROACH 1: COPY from build context (CURRENT)
-# ============================================================
-# The CodeBuild buildspec clones the PR code before building the image:
-#   git clone https://x-access-token@github.com/${GITHUB_REPOSITORY}.git ${REPO_NAME}
-#   git checkout ${HEAD_SHA}
-#
-# This ensures:
-# - Exact commit is used (reproducible builds)
-# - Token is not exposed in Docker layers
-# - Build context contains the PR code
-#
-# Security: Token never appears in Docker image history
-# ============================================================
 
 WORKDIR /workspace
 
 COPY ${REPO_NAME}/ /opt/torch-neuronx-pr/
 
 # ============================================================
-# APPROACH 2: Clone and checkout PR inside Dockerfile (ALTERNATIVE)
+# Clone and checkout PR inside Dockerfile 
 # ============================================================
 # Use this approach for actual torch-neuronx PRs when you want to
 # clone directly in the Dockerfile instead of using buildspec.
