@@ -17,84 +17,27 @@ env:
 jobs:
   hello-world:
     name: Hello World Smoke Test
-    runs-on: [self-hosted, linux, neuron, neuron.build-image]
+    runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     steps:
-      - name: Hello from Kaizen 1
-        run: echo "Hello from Kaizen EKS container!"
-      - name: Check environment
+      - name: Smoke Test
         run: |
+          echo "Hello from Kaizen EKS container!"
           echo "Hostname: $(hostname)"
-          echo "Kernel: $(uname -r)"
-          echo "PWD: $(pwd)"
           echo "Python: $(python3 --version 2>&1 || echo 'not found')"
-          echo "Workspace contents:"
-          ls -la /workspace/ || echo "No /workspace"
-      - name: Multi-line script test
-        run: |
-          A=1
-          B=2
-          C=$((A + B))
-          echo "Math works: $A + $B = $C"
-          if [ "$C" -eq 3 ]; then
-            echo "SUCCESS: if/then/fi works!"
-          else
-            echo "FAIL"
-            exit 1
-          fi
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
 
-  # aten-unit-tests:
-  #   name: ATen Unit Tests (trn1)
-  #   runs-on: [self-hosted, linux, neuron, neuron.build-image]
-  #   timeout-minutes: 240
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #     - name: Print Neuron Info
-  #       run: |
-  #         echo "============================================="
-  #         echo "       NEURON ENVIRONMENT INFO               "
-  #         echo "============================================="
-  #         python3 --version
-  #         python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
-  #         neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
-  #         echo "============================================="
-  #     - name: Install Test Dependencies
-  #       run: |
-  #         pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
-  #     - name: Run ATen Unit Tests
-  #       env:
-  #         NEURON_LAUNCH_BLOCKING: "1"
-  #       run: |
-  #         echo "============================================="
-  #         echo "           RUNNING ATEN UNIT TESTS           "
-  #         echo "============================================="
-  #         mkdir -p outputs/test-reports
-  #         ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
-  #         echo "============================================="
-  #     - name: Upload Test Results
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: aten-test-results
-  #         path: |
-  #           outputs/
-  #           *.html
-  #           *.xml
-  #         retention-days: 30
-
-  # ============================================
-  # TorchNeuronX ATen Unit Tests via Kaizen (trn1.32xlarge)
-  # ============================================
-  kaizen-aten-unit-tests:
-    name: TorchNeuronX Kaizen ATen Unit Tests
+  aten-unit-tests:
+    name: ATen Unit Tests (trn1)
     runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     timeout-minutes: 240
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Print Neuron Info
+      - name: Run ATen Unit Tests
+        env:
+          NEURON_LAUNCH_BLOCKING: "1"
         run: |
           echo "============================================="
           echo "       NEURON ENVIRONMENT INFO               "
@@ -102,15 +45,6 @@ jobs:
           python3 --version
           python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
           neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
-          echo "============================================="
-
-      - name: Install Dependencies and Run ATen Unit Tests
-        env:
-          NEURON_LAUNCH_BLOCKING: "1"
-        run: |
-          # New image has repo at /opt/torch-neuronx (not /workspace/private-neuron-integration-dev)
-          cd /opt/torch-neuronx
-          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
           echo "============================================="
           echo "           RUNNING ATEN UNIT TESTS           "
           echo "============================================="
