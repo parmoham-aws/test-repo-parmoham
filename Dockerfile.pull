@@ -138,7 +138,7 @@
 #
 # ============================================================
 
-ARG BASE_IMAGE_URI=882938390504.dkr.ecr.us-west-2.amazonaws.com:private-neuron-integration-dev-nightly-nightly-base-stable
+ARG BASE_IMAGE_URI=882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-stable
 FROM ${BASE_IMAGE_URI}
 
 # Build arguments (provided by Image Trigger Lambda → Build Trigger Handler → CodeBuild)
