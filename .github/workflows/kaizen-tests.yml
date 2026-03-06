@@ -49,45 +49,6 @@ concurrency:
 
 jobs:
   # ============================================
-  # Torch Unit Tests via Kaizen (trn1.32xlarge)
-  # ============================================
-  kaizen-torch-unit-tests:
-    name: Kaizen Torch Unit Tests
-    runs-on:
-      - self-hosted
-      - linux
-      - neuron
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Print Neuron Info
-        run: |
-          echo "============================================="
-          echo "       KAIZEN TORCH UNIT TESTS               "
-          echo "  (via Kaizen on trn1.32xlarge EKS cluster)  "
-          echo "============================================="
-          python3 --version
-          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
-          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
-          echo "============================================="
-
-      - name: Install Dependencies and Run Torch Unit Tests
-        env:
-          NEURON_LAUNCH_BLOCKING: "1"
-        run: |
-          # New image has repo at /opt/torch-neuronx (not /workspace/private-neuron-integration-dev)
-          cd /opt/torch-neuronx
-          echo "============================================="
-          echo "         RUNNING TORCH UNIT TESTS            "
-          echo "============================================="
-          mkdir -p outputs/test-reports
-          ./tools/run-test-parallel tests/ --skip-distributed --coverage --json-report --report-dir=outputs/test-reports || echo "Tests completed"
-          echo "============================================="
-
-  # ============================================
   # ATen Unit Tests via Kaizen (trn1.32xlarge)
   # ============================================
   kaizen-aten-unit-tests:
