@@ -16,7 +16,7 @@ env:
   AWS_DEFAULT_REGION: us-west-2
 jobs:
   hello-world:
-    name: Hello World Smoke Test 12
+    name: Hello World Smoke Test 123
     runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     steps:
       - name: Smoke Test
