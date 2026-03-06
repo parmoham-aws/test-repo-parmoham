@@ -19,7 +19,7 @@ jobs:
     name: Hello World Smoke Test
     runs-on: [self-hosted, linux, neuron, neuron.build-image]
     steps:
-      - name: Hello from Kaizen
+      - name: Hello from Kaizen 1
         run: echo "Hello from Kaizen EKS container!"
       - name: Check environment
         run: |
