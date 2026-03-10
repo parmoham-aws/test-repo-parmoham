@@ -200,3 +200,44 @@ RUN rm -f /etc/apt/sources.list.d/neuron.list 2>/dev/null; true
 RUN mkdir -p /workspace
 WORKDIR /workspace
 CMD ["/bin/bash"]
+
+
+# ============================================================
+# Stage 2: complete — only torch-neuronx clone + build
+# ============================================================
+FROM nightly-base AS complete
+
+ARG GITHUB_TOKEN=""
+
+# ── Clone torch-neuronx ──────────────────────────────────────
+RUN cd /opt && \
+    if [ -d torch-neuronx/.venv ]; then \
+      VENV_BAK=$(mktemp -d) && mv torch-neuronx/.venv "$VENV_BAK/"; \
+    fi && \
+    if [ -n "${GITHUB_TOKEN}" ]; then \
+      git clone https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-neuronx.git torch-neuronx-src; \
+    else \
+      git clone https://github.com/aws-neuron/torch-neuronx.git torch-neuronx-src; \
+    fi && \
+    # Move cloned files into the existing torch-neuronx dir (preserving .venv)
+    cp -a torch-neuronx-src/. torch-neuronx/ && \
+    rm -rf torch-neuronx-src && \
+    if [ -d "$VENV_BAK/.venv" ]; then mv "$VENV_BAK/.venv" torch-neuronx/; rm -rf "$VENV_BAK"; fi
+
+RUN chmod +x /opt/torch-neuronx/tools/* && \
+    chmod +x /opt/torch-neuronx/tests/pytorch_tests/*.sh || true
+
+# ── Build torch-neuronx ──────────────────────────────────────
+RUN cd /opt/torch-neuronx && \
+    uv pip install -e .[dev] && \
+    chmod +x ./tools/* && \
+    ./tools/build
+
+# ── Verify installation ──────────────────────────────────────
+RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" && \
+    ls -la /opt/torch-neuronx/torch_neuronx/_C*.so && \
+    pip list | grep -i neuron
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["/bin/bash"]
