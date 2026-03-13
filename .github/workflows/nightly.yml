@@ -1,19 +1,17 @@
 name: Nightly Base Image Build
 
-# This workflow is dispatched by nightly-dispatcher.yml on main.
-# Each branch has its own copy with its own build logic and Dockerfile.
-# NO schedule here — the dispatcher handles scheduling.
+# ⚠️ TESTING MODE: build-base is commented out, using hardcoded base image.
+# TODO: Restore build-base job after testing build-nightly-whl flow.
 #
-# Workflow DAG (3-job sequential):
+# Workflow DAG (3-job sequential — normal mode):
 #   build-base (neuron.build-nightly)
 #       ↓
 #   build-nightly-whl (neuron.build-nightly-whl)
 #       ↓
 #   promote-to-stable (neuron.tag-nightly-stable)
 #
-# build-base builds the base image with all dependencies (~60 min).
-# build-nightly-whl builds the complete image + wheel + uploads to GitHub Release.
-# promote-to-stable tags ECR images with -stable and promotes the wheel.
+# TESTING MODE (current): build-nightly-whl → promote-to-stable
+# Using pre-built base image directly.
 on:
   workflow_dispatch:
 
@@ -21,54 +19,40 @@ permissions:
   contents: read
 
 jobs:
-  # ── Job 1: Build Base Image ────────────────────────────────
-  # The neuron.build-nightly label triggers:
-  #   1. Webhook → Nightly Image Trigger Lambda → CodeBuild (starts the build)
-  #   2. Scale-up Lambda → EC2 runner (installs polling script via user data)
-  # The workflow step below calls the EC2-installed script to wait for the image.
-  build-base:
-    name: Build Nightly Base Image
-    runs-on: [self-hosted, linux, neuron.build-nightly]
-    timeout-minutes: 120
-    outputs:
-      base_image: ${{ steps.wait.outputs.image_uri }}
-    steps:
-      - name: Wait for nightly base image
-        id: wait
-        run: |
-          echo "========================================="
-          echo "  Nightly Base Image Build"
-          echo "  Branch: ${{ github.ref_name }}"
-          echo "  Run ID: ${{ github.run_id }}"
-          echo "========================================="
-          # Call the polling script installed by EC2 user data
-          # This blocks until the image build completes (SUCCEEDED/FAILED)
-          # Logs appear here in GitHub Actions UI
-          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
-
-          # Extract IMAGE_URI from the success message
-          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
-          echo "Captured image URI: $IMAGE_URI"
-          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+  # ── Job 1: Build Base Image (COMMENTED OUT FOR TESTING) ────
+  # build-base:
+  #   name: Build Nightly Base Image
+  #   runs-on: [self-hosted, linux, neuron.build-nightly]
+  #   timeout-minutes: 120
+  #   outputs:
+  #     base_image: ${{ steps.wait.outputs.image_uri }}
+  #   steps:
+  #     - name: Wait for nightly base image
+  #       id: wait
+  #       run: |
+  #         echo "========================================="
+  #         echo "  Nightly Base Image Build"
+  #         echo "  Branch: ${{ github.ref_name }}"
+  #         echo "  Run ID: ${{ github.run_id }}"
+  #         echo "========================================="
+  #         /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
+  #         IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
+  #         echo "Captured image URI: $IMAGE_URI"
+  #         echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
   # ── Job 2: Build Complete Image + Wheel ─────────────────────
-  # Builds the complete Docker image (base + torch-neuronx) via CodeBuild,
-  # then builds the wheel inside the image and uploads to GitHub Release.
+  # TESTING: Using hardcoded base image instead of build-base output.
   # The neuron.build-nightly-whl label triggers the Nightly Image Trigger Lambda
   # with build_wheel=true, which tells CodeBuild to also build + upload the wheel.
-  #
-  # Uses neuron.dockerfile:Dockerfile.complete to build on top of the base image.
-  # The neuron.base-image: label passes the base image URI from Job 1.
   build-nightly-whl:
     name: Build Complete Image + Wheel
-    needs: [build-base]
-    if: success()
+    # needs: [build-base]  # COMMENTED OUT FOR TESTING
     runs-on: [
       self-hosted,
       linux,
       neuron.build-nightly-whl,
       "neuron.dockerfile:Dockerfile.complete",
-      "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
+      "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
     ]
     timeout-minutes: 120
     outputs:
@@ -78,8 +62,8 @@ jobs:
         id: wait
         run: |
           echo "========================================="
-          echo "  Build Complete Image + Wheel"
-          echo "  Base: ${{ needs.build-base.outputs.base_image }}"
+          echo "  Build Complete Image + Wheel (TESTING)"
+          echo "  Base: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
@@ -95,16 +79,9 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
   # ── Job 3: Promote to Stable ───────────────────────────────
-  # Tags ECR images with -stable suffix and promotes the wheel
-  # from dev-wheels to stable-wheels GitHub Release.
-  #
-  # The neuron.tag-nightly-stable label triggers:
-  #   1. Webhook → Nightly Tagger Lambda → ECR PutImage (tags with -stable)
-  #   2. Scale-up Lambda → EC2 runner (verifies tag exists)
-  # The neuron.nightly-image: label passes the image URI to the webhook.
   promote-to-stable:
     name: Promote to Stable
-    needs: [build-base, build-nightly-whl]
+    needs: [build-nightly-whl]  # Removed build-base for testing
     if: success()
     runs-on: [
       self-hosted,
@@ -121,14 +98,11 @@ jobs:
           echo "  Stable Tagging Verification"
           echo "========================================="
 
-          # Extract image URI from the neuron.nightly-image: label
           IMAGE_URI="${{ needs.build-nightly-whl.outputs.complete_image }}"
           export NIGHTLY_IMAGE_URI="$IMAGE_URI"
 
           echo "Complete image: $NIGHTLY_IMAGE_URI"
 
-          # The webhook Lambda has already invoked the Nightly Tagger Lambda
-          # asynchronously. We just need to verify the -stable tag exists.
           /opt/neuron-ci/verify-stable-tag.sh
 
           echo "✓ ECR stable tagging complete"
@@ -141,7 +115,6 @@ jobs:
           echo "  Wheel Stable Promotion"
           echo "========================================="
 
-          # Download the latest wheel from dev-wheels release
           echo "Downloading wheel from dev-wheels release..."
           mkdir -p /tmp/stable-dist
           gh release download dev-wheels \
@@ -189,9 +162,9 @@ jobs:
       - name: Summary
         run: |
           echo "========================================="
-          echo "  ✓ Nightly Build Complete"
+          echo "  ✓ Nightly Build Complete (TESTING)"
           echo "========================================="
-          echo "  Base image:     ${{ needs.build-base.outputs.base_image }}"
+          echo "  Base image:     882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818 (hardcoded)"
           echo "  Complete image: ${{ needs.build-nightly-whl.outputs.complete_image }}"
           echo ""
           echo "  ECR stable tag: applied"
