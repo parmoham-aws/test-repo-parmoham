@@ -1,0 +1,69 @@
+# ============================================================
+# Dockerfile.complete — torch-neuronx complete image
+#
+# Builds on top of the nightly base image by installing the
+# pre-built torch-neuronx wheel from GitHub Releases.
+#
+# This is ~5 min (pip install) vs ~15 min (source build).
+# The wheel is built separately by the build-whl job and
+# uploaded to the dev-wheels GitHub Release.
+#
+# Build args:
+#   BASE_IMAGE    — ECR URI of the nightly base image
+#                   (e.g. 123456789.dkr.ecr.us-west-2.amazonaws.com/repo:tag)
+#   GITHUB_TOKEN  — GitHub token for downloading from private release
+# ============================================================
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG GITHUB_TOKEN=""
+
+# ── Install torch-neuronx from GitHub Release ────────────────
+# Downloads the pre-built wheel from the dev-wheels release.
+# Follows the same pattern as torch-mlir installation in
+# Dockerfile.base-dependencies.
+RUN if [ -n "${GITHUB_TOKEN}" ]; then \
+      echo "Installing torch-neuronx from dev-wheels release..." && \
+      PYTHON_TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')" && \
+      PLATFORM="linux_x86_64" && \
+      RELEASE_DATA=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+        "https://api.github.com/repos/aws-neuron/torch-neuronx/releases/tags/dev-wheels") && \
+      FILENAME=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"torch_neuronx.*${PYTHON_TAG}.*${PLATFORM}\")) | .name" | head -1) && \
+      if [ -z "$FILENAME" ]; then \
+        echo "ERROR: No matching wheel found for ${PYTHON_TAG} ${PLATFORM} in dev-wheels release" && \
+        echo "Available assets:" && \
+        echo "$RELEASE_DATA" | jq -r '.assets[].name' && \
+        exit 1; \
+      fi && \
+      echo "Downloading wheel: $FILENAME" && \
+      ASSET_ID=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name==\"$FILENAME\") | .id") && \
+      curl -L -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        -o "/tmp/$FILENAME" \
+        "https://api.github.com/repos/aws-neuron/torch-neuronx/releases/assets/$ASSET_ID" && \
+      uv pip install --no-deps "/tmp/$FILENAME" && \
+      rm -f "/tmp/$FILENAME" && \
+      echo "torch-neuronx installed successfully from dev-wheels release"; \
+    else \
+      echo "ERROR: GITHUB_TOKEN not set — cannot download torch-neuronx wheel"; \
+      exit 1; \
+    fi
+
+# ── Clone torch-neuronx repo for test files ──────────────────
+# Tests reference files from the repo (e.g. conftest.py, specs/)
+# We clone without building since the wheel is already installed.
+RUN if [ -n "${GITHUB_TOKEN}" ]; then \
+      git clone "https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-neuronx.git" \
+        /workspace/torch-neuronx && \
+      echo "torch-neuronx repo cloned to /workspace/torch-neuronx"; \
+    else \
+      echo "WARNING: GITHUB_TOKEN not set, skipping repo clone"; \
+    fi
+
+# ── Verify installation ───────────────────────────────────────
+RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c "import torch_neuronx; print('torch_neuronx OK:', torch_neuronx.__version__)" || \
+    echo "WARNING: torch_neuronx import check failed (may need Neuron runtime at test time)"
+
+WORKDIR /workspace
+CMD ["/bin/bash"]
