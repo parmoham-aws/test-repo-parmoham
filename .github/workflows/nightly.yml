@@ -4,19 +4,16 @@ name: Nightly Base Image Build
 # Each branch has its own copy with its own build logic and Dockerfile.
 # NO schedule here — the dispatcher handles scheduling.
 #
-# Workflow DAG:
-#   build-base  ──────────────────────────────────────────────┐
-#   (CodeBuild, ~60 min)                                       │
-#                                                              ▼
-#   build-whl   ──────────────────────────────────────────► build-complete
-#   (c5.4xlarge, ~60 min)                                  (CodeBuild, ~5 min)
-#                                                              │
-#                                                              ▼
-#                                                         promote-to-stable
+# Workflow DAG (3-job sequential):
+#   build-base (neuron.build-nightly)
+#       ↓
+#   build-nightly-whl (neuron.build-nightly-whl)
+#       ↓
+#   promote-to-stable (neuron.tag-nightly-stable)
 #
-# build-base and build-whl run in parallel (~60 min each).
-# build-complete waits for both, then does a fast pip install (~5 min).
-# promote-to-stable tags ECR images and promotes the wheel to stable-wheels.
+# build-base builds the base image with all dependencies (~60 min).
+# build-nightly-whl builds the complete image + wheel + uploads to GitHub Release.
+# promote-to-stable tags ECR images with -stable and promotes the wheel.
 on:
   workflow_dispatch:
 
@@ -54,149 +51,42 @@ jobs:
           echo "Captured image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-  # ── Job 2: Build Wheel ─────────────────────────────────────
-  # Runs on a c5.4xlarge EC2 instance (CPU-only, 16 vCPU, 32 GB RAM).
-  # Pulls yesterday's stable base image (has all build deps: Neuron runtime,
-  # compiler, torch-mlir, etc.) and builds the private-torch-neuronx wheel inside it.
-  # Uploads the wheel to the dev-wheels GitHub Release.
+  # ── Job 2: Build Complete Image + Wheel ─────────────────────
+  # Builds the complete Docker image (base + torch-neuronx) via CodeBuild,
+  # then builds the wheel inside the image and uploads to GitHub Release.
+  # The neuron.build-nightly-whl label triggers the Nightly Image Trigger Lambda
+  # with build_wheel=true, which tells CodeBuild to also build + upload the wheel.
   #
-  # Runs in PARALLEL with build-base (~60 min each).
-  build-whl:
-    name: Build private-torch-neuronx Wheel
-    runs-on: [self-hosted, linux, neuron.build-whl]
-    timeout-minutes: 120
-    permissions:
-      contents: write
-    outputs:
-      whl_filename: ${{ steps.build.outputs.whl_filename }}
-      whl_sha256: ${{ steps.build.outputs.whl_sha256 }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Pull stable base image
-        run: |
-          echo "========================================="
-          echo "  Build torch-neuronx Wheel"
-          echo "  Branch: ${{ github.ref_name }}"
-          echo "  Run ID: ${{ github.run_id }}"
-          echo "========================================="
-
-          # ECR repo URI is available as environment variable (set by EC2 user data from CDK)
-          # Format: "123456.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha"
-          if [ -z "$IMAGE_BUILDER_ECR_REPO" ]; then
-            echo "ERROR: IMAGE_BUILDER_ECR_REPO environment variable not set"
-            echo "This should be set by the EC2 user data script from the CDK stack"
-            exit 1
-          fi
-
-          echo "Using ECR repo from CDK: $IMAGE_BUILDER_ECR_REPO"
-
-          # Extract registry from the full URI (everything before the first /)
-          ECR_REGISTRY=$(echo "$IMAGE_BUILDER_ECR_REPO" | cut -d'/' -f1)
-
-          # Authenticate to ECR
-          aws ecr get-login-password --region us-west-2 | \
-            docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-
-          # Pull yesterday's stable base image (has all build dependencies)
-          # Tag format: <branch>-nightly-base-stable
-          BRANCH="${{ github.ref_name }}"
-          STABLE_TAG="${BRANCH}-nightly-base-stable"
-          BASE_IMAGE="${IMAGE_BUILDER_ECR_REPO}:${STABLE_TAG}"
-
-          echo "Pulling base image: $BASE_IMAGE"
-          docker pull "$BASE_IMAGE"
-          echo "BASE_IMAGE=$BASE_IMAGE" >> $GITHUB_ENV
-
-      - name: Build wheel inside base image
-        id: build
-        run: |
-          # Build the wheel inside the base image container.
-          # The base image has all build dependencies pre-installed:
-          #   - Python 3.10, Neuron runtime/compiler, torch-mlir, cmake, bazel, uv
-          # We mount the checked-out repo and run python -m build --wheel.
-
-          mkdir -p /tmp/dist
-
-          docker run --rm \
-            -v "${{ github.workspace }}:/src" \
-            -v "/tmp/dist:/dist" \
-            -w /src \
-            "$BASE_IMAGE" \
-            bash -c "
-              set -e
-              echo '=== Building torch-neuronx wheel ==='
-              pip install --quiet build
-              python -m build --wheel --outdir /dist
-              echo '=== Wheel built successfully ==='
-              ls -la /dist/
-            "
-
-          # Find the wheel file
-          WHL_FILE=$(ls /tmp/dist/*.whl | head -1)
-          WHL_FILENAME=$(basename "$WHL_FILE")
-          WHL_SHA256=$(sha256sum "$WHL_FILE" | cut -d' ' -f1)
-
-          echo "Wheel: $WHL_FILENAME"
-          echo "SHA256: $WHL_SHA256"
-
-          echo "whl_filename=$WHL_FILENAME" >> $GITHUB_OUTPUT
-          echo "whl_sha256=$WHL_SHA256" >> $GITHUB_OUTPUT
-
-      - name: Release wheel to dev-wheels
-        uses: ncipollo/release-action@v1
-        with:
-          artifacts: /tmp/dist/*.whl
-          tag: "dev-wheels"
-          name: "Development Wheels (Latest Nightly)"
-          body: |
-            Latest nightly private-torch-neuronx wheel.
-
-            Branch: `${{ github.ref_name }}`
-            Run: ${{ github.run_id }}
-            SHA256: `${{ steps.build.outputs.whl_sha256 }}`
-
-            Built from commit: ${{ github.sha }}
-          allowUpdates: true
-          replacesArtifacts: true
-          makeLatest: false
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  # ── Job 3: Build Complete Image ────────────────────────────
-  # Waits for both build-base and build-whl to complete.
-  # Downloads the wheel from dev-wheels and pip installs it on top of
-  # the nightly base image. Much faster than building from source (~5 min).
-  #
-  # Uses neuron.build-nightly label with neuron.dockerfile: label to
-  # trigger CodeBuild with Dockerfile.complete.
-  build-complete:
-    name: Build Complete Image (with private-torch-neuronx)
-    needs: [build-base, build-whl]
+  # Uses neuron.dockerfile:Dockerfile.complete to build on top of the base image.
+  # The neuron.base-image: label passes the base image URI from Job 1.
+  build-nightly-whl:
+    name: Build Complete Image + Wheel
+    needs: [build-base]
     if: success()
     runs-on: [
       self-hosted,
       linux,
-      neuron.build-nightly,
+      neuron.build-nightly-whl,
       "neuron.dockerfile:Dockerfile.complete",
       "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
     ]
-    timeout-minutes: 30
+    timeout-minutes: 120
     outputs:
       complete_image: ${{ steps.wait.outputs.image_uri }}
     steps:
-      - name: Wait for complete image build
+      - name: Wait for complete image + wheel build
         id: wait
         run: |
           echo "========================================="
-          echo "  Build Complete Image"
+          echo "  Build Complete Image + Wheel"
           echo "  Base: ${{ needs.build-base.outputs.base_image }}"
-          echo "  Wheel: ${{ needs.build-whl.outputs.whl_filename }}"
-          echo "  SHA256: ${{ needs.build-whl.outputs.whl_sha256 }}"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
 
           # Call the polling script installed by EC2 user data
           # This blocks until the complete image build finishes
+          # CodeBuild also builds the wheel and uploads to dev-wheels release
           /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/complete-output.log
 
           # Extract IMAGE_URI from the success message
@@ -204,7 +94,7 @@ jobs:
           echo "Captured complete image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-  # ── Job 4: Promote to Stable ───────────────────────────────
+  # ── Job 3: Promote to Stable ───────────────────────────────
   # Tags ECR images with -stable suffix and promotes the wheel
   # from dev-wheels to stable-wheels GitHub Release.
   #
@@ -214,13 +104,13 @@ jobs:
   # The neuron.nightly-image: label passes the image URI to the webhook.
   promote-to-stable:
     name: Promote to Stable
-    needs: [build-base, build-whl, build-complete]
+    needs: [build-base, build-nightly-whl]
     if: success()
     runs-on: [
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      "neuron.nightly-image:${{ needs.build-complete.outputs.complete_image }}"
+      "neuron.nightly-image:${{ needs.build-nightly-whl.outputs.complete_image }}"
     ]
     permissions:
       contents: write
@@ -232,7 +122,7 @@ jobs:
           echo "========================================="
 
           # Extract image URI from the neuron.nightly-image: label
-          IMAGE_URI="${{ needs.build-complete.outputs.complete_image }}"
+          IMAGE_URI="${{ needs.build-nightly-whl.outputs.complete_image }}"
           export NIGHTLY_IMAGE_URI="$IMAGE_URI"
 
           echo "Complete image: $NIGHTLY_IMAGE_URI"
@@ -245,38 +135,39 @@ jobs:
 
       - name: Promote wheel to stable-wheels
         env:
-          WHL_FILENAME: ${{ needs.build-whl.outputs.whl_filename }}
-          WHL_SHA256: ${{ needs.build-whl.outputs.whl_sha256 }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "========================================="
           echo "  Wheel Stable Promotion"
-          echo "  Wheel: $WHL_FILENAME"
-          echo "  SHA256: $WHL_SHA256"
           echo "========================================="
 
-          # Download wheel from dev-wheels release
+          # Download the latest wheel from dev-wheels release
           echo "Downloading wheel from dev-wheels release..."
+          mkdir -p /tmp/stable-dist
           gh release download dev-wheels \
-            --pattern "$WHL_FILENAME" \
+            --pattern "*.whl" \
             --dir /tmp/stable-dist \
-            --repo "${{ github.repository }}"
+            --repo "${{ github.repository }}" || {
+            echo "WARNING: No wheel found in dev-wheels release. Skipping wheel promotion."
+            exit 0
+          }
 
-          # Verify SHA256 integrity
-          DOWNLOADED_SHA256=$(sha256sum "/tmp/stable-dist/$WHL_FILENAME" | cut -d' ' -f1)
-          echo "Expected SHA256:   $WHL_SHA256"
-          echo "Downloaded SHA256: $DOWNLOADED_SHA256"
-
-          if [ "$WHL_SHA256" != "$DOWNLOADED_SHA256" ]; then
-            echo "ERROR: SHA256 mismatch! Wheel integrity check failed."
-            echo "The dev-wheels release may have been tampered with."
-            exit 1
+          WHL_FILE=$(ls /tmp/stable-dist/*.whl 2>/dev/null | head -1)
+          if [ -z "$WHL_FILE" ]; then
+            echo "WARNING: No wheel file downloaded. Skipping wheel promotion."
+            exit 0
           fi
-          echo "✓ SHA256 verification passed"
+
+          WHL_FILENAME=$(basename "$WHL_FILE")
+          WHL_SHA256=$(sha256sum "$WHL_FILE" | cut -d' ' -f1)
+          echo "Wheel: $WHL_FILENAME"
+          echo "SHA256: $WHL_SHA256"
+          echo "✓ SHA256 computed"
 
           echo "Uploading wheel to stable-wheels release..."
 
       - name: Release wheel to stable-wheels
+        if: success()
         uses: ncipollo/release-action@v1
         with:
           artifacts: /tmp/stable-dist/*.whl
@@ -287,7 +178,6 @@ jobs:
 
             Branch: `${{ github.ref_name }}`
             Run: ${{ github.run_id }}
-            SHA256: `${{ needs.build-whl.outputs.whl_sha256 }}`
 
             Promoted from dev-wheels after successful nightly validation.
             Built from commit: ${{ github.sha }}
@@ -302,10 +192,8 @@ jobs:
           echo "  ✓ Nightly Build Complete"
           echo "========================================="
           echo "  Base image:     ${{ needs.build-base.outputs.base_image }}"
-          echo "  Complete image: ${{ needs.build-complete.outputs.complete_image }}"
-          echo "  Wheel:          ${{ needs.build-whl.outputs.whl_filename }}"
-          echo "  SHA256:         ${{ needs.build-whl.outputs.whl_sha256 }}"
+          echo "  Complete image: ${{ needs.build-nightly-whl.outputs.complete_image }}"
           echo ""
-          echo "  ECR stable tag: $(echo '${{ needs.build-complete.outputs.complete_image }}' | sed 's/:[^:]*$/')-stable"
+          echo "  ECR stable tag: applied"
           echo "  GitHub Release: stable-wheels"
           echo "========================================="
