@@ -57,12 +57,12 @@ jobs:
   # ── Job 2: Build Wheel ─────────────────────────────────────
   # Runs on a c5.4xlarge EC2 instance (CPU-only, 16 vCPU, 32 GB RAM).
   # Pulls yesterday's stable base image (has all build deps: Neuron runtime,
-  # compiler, torch-mlir, etc.) and builds the torch-neuronx wheel inside it.
+  # compiler, torch-mlir, etc.) and builds the private-torch-neuronx wheel inside it.
   # Uploads the wheel to the dev-wheels GitHub Release.
   #
   # Runs in PARALLEL with build-base (~60 min each).
   build-whl:
-    name: Build torch-neuronx Wheel
+    name: Build private-torch-neuronx Wheel
     runs-on: [self-hosted, linux, neuron.build-whl]
     timeout-minutes: 120
     permissions:
@@ -75,15 +75,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Pull stable base image
-        env:
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          ECR_REPO: ${{ secrets.ECR_REPO }}
         run: |
           echo "========================================="
           echo "  Build torch-neuronx Wheel"
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
+
+          # ECR repo URI is available as environment variable (set by EC2 user data from CDK)
+          # Format: "123456.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha"
+          if [ -z "$IMAGE_BUILDER_ECR_REPO" ]; then
+            echo "ERROR: IMAGE_BUILDER_ECR_REPO environment variable not set"
+            echo "This should be set by the EC2 user data script from the CDK stack"
+            exit 1
+          fi
+
+          echo "Using ECR repo from CDK: $IMAGE_BUILDER_ECR_REPO"
+
+          # Extract registry from the full URI (everything before the first /)
+          ECR_REGISTRY=$(echo "$IMAGE_BUILDER_ECR_REPO" | cut -d'/' -f1)
 
           # Authenticate to ECR
           aws ecr get-login-password --region us-west-2 | \
@@ -93,7 +103,7 @@ jobs:
           # Tag format: <branch>-nightly-base-stable
           BRANCH="${{ github.ref_name }}"
           STABLE_TAG="${BRANCH}-nightly-base-stable"
-          BASE_IMAGE="${ECR_REGISTRY}/${ECR_REPO}:${STABLE_TAG}"
+          BASE_IMAGE="${IMAGE_BUILDER_ECR_REPO}:${STABLE_TAG}"
 
           echo "Pulling base image: $BASE_IMAGE"
           docker pull "$BASE_IMAGE"
@@ -141,7 +151,7 @@ jobs:
           tag: "dev-wheels"
           name: "Development Wheels (Latest Nightly)"
           body: |
-            Latest nightly torch-neuronx wheel.
+            Latest nightly private-torch-neuronx wheel.
 
             Branch: `${{ github.ref_name }}`
             Run: ${{ github.run_id }}
@@ -161,7 +171,7 @@ jobs:
   # Uses neuron.build-nightly label with neuron.dockerfile: label to
   # trigger CodeBuild with Dockerfile.complete.
   build-complete:
-    name: Build Complete Image (with torch-neuronx)
+    name: Build Complete Image (with private-torch-neuronx)
     needs: [build-base, build-whl]
     if: success()
     runs-on: [
@@ -273,7 +283,7 @@ jobs:
           tag: "stable-wheels"
           name: "Stable Wheels (Latest Validated)"
           body: |
-            Latest validated torch-neuronx wheel.
+            Latest validated private-torch-neuronx wheel.
 
             Branch: `${{ github.ref_name }}`
             Run: ${{ github.run_id }}
