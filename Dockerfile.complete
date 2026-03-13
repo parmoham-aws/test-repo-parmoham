@@ -2,52 +2,40 @@
 # Dockerfile.complete — torch-neuronx complete image
 #
 # Builds on top of the nightly base image by installing the
-# pre-built torch-neuronx wheel from GitHub Releases.
+# pre-built torch-neuronx wheel from the build context.
 #
-# This is ~5 min (pip install) vs ~15 min (source build).
-# The wheel is built separately by the build-whl job and
-# uploaded to the dev-wheels GitHub Release.
+# The wheel is built in CodeBuild's pre_build phase (inside the
+# base image container) and placed in the build context before
+# this Dockerfile runs. This ensures the wheel and image use
+# the exact same commit.
+#
+# This is ~5 min (pip install from local .whl) vs ~60 min
+# (building from source inside Docker).
 #
 # Build args:
-#   BASE_IMAGE    — ECR URI of the nightly base image
-#                   (e.g. 123456789.dkr.ecr.us-west-2.amazonaws.com/repo:tag)
-#   GITHUB_TOKEN  — GitHub token for downloading from private release
+#   BASE_IMAGE_URI — ECR URI of the nightly base image
+#   GITHUB_TOKEN   — GitHub token for cloning repo (test files)
+#   GITHUB_REPOSITORY — e.g. "aws-neuron/neuron-integration-dev"
 # ============================================================
 
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+ARG BASE_IMAGE_URI
+FROM ${BASE_IMAGE_URI}
 
 ARG GITHUB_TOKEN=""
 ARG GITHUB_REPOSITORY="aws-neuron/neuron-integration-dev"
 
-# ── Install torch-neuronx from GitHub Release ────────────────
-# Downloads the pre-built wheel from the dev-wheels release.
-# Follows the same pattern as torch-mlir installation in
-# Dockerfile.base-dependencies.
-RUN if [ -n "${GITHUB_TOKEN}" ]; then \
-      echo "Installing torch-neuronx from dev-wheels release..." && \
-      PYTHON_TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')" && \
-      PLATFORM="linux_x86_64" && \
-      RELEASE_DATA=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/dev-wheels") && \
-      FILENAME=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"torch_neuronx.*${PYTHON_TAG}.*${PLATFORM}\")) | .name" | head -1) && \
-      if [ -z "$FILENAME" ]; then \
-        echo "ERROR: No matching wheel found for ${PYTHON_TAG} ${PLATFORM} in dev-wheels release" && \
-        echo "Available assets:" && \
-        echo "$RELEASE_DATA" | jq -r '.assets[].name' && \
-        exit 1; \
-      fi && \
-      echo "Downloading wheel: $FILENAME" && \
-      ASSET_ID=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name==\"$FILENAME\") | .id") && \
-      curl -L -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/octet-stream" \
-        -o "/tmp/$FILENAME" \
-        "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/$ASSET_ID" && \
-      uv pip install --no-deps "/tmp/$FILENAME" && \
-      rm -f "/tmp/$FILENAME" && \
-      echo "torch-neuronx installed successfully from dev-wheels release"; \
+# ── Install torch-neuronx from local wheel ───────────────────
+# The wheel file is placed in the build context by CodeBuild's
+# pre_build phase. COPY it in and pip install.
+COPY *.whl /tmp/
+RUN WHL_FILE=$(ls /tmp/*.whl 2>/dev/null | head -1) && \
+    if [ -n "$WHL_FILE" ]; then \
+      echo "Installing torch-neuronx from local wheel: $(basename $WHL_FILE)" && \
+      uv pip install --no-deps "$WHL_FILE" && \
+      rm -f /tmp/*.whl && \
+      echo "torch-neuronx installed successfully from local wheel"; \
     else \
-      echo "ERROR: GITHUB_TOKEN not set — cannot download torch-neuronx wheel"; \
+      echo "ERROR: No .whl file found in build context" && \
       exit 1; \
     fi
 
