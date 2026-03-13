@@ -18,6 +18,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG GITHUB_TOKEN=""
+ARG GITHUB_REPOSITORY="aws-neuron/neuron-integration-dev"
 
 # ── Install torch-neuronx from GitHub Release ────────────────
 # Downloads the pre-built wheel from the dev-wheels release.
@@ -28,7 +29,7 @@ RUN if [ -n "${GITHUB_TOKEN}" ]; then \
       PYTHON_TAG="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')" && \
       PLATFORM="linux_x86_64" && \
       RELEASE_DATA=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-        "https://api.github.com/repos/aws-neuron/torch-neuronx/releases/tags/dev-wheels") && \
+        "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/dev-wheels") && \
       FILENAME=$(echo "$RELEASE_DATA" | jq -r ".assets[] | select(.name | test(\"torch_neuronx.*${PYTHON_TAG}.*${PLATFORM}\")) | .name" | head -1) && \
       if [ -z "$FILENAME" ]; then \
         echo "ERROR: No matching wheel found for ${PYTHON_TAG} ${PLATFORM} in dev-wheels release" && \
@@ -41,7 +42,7 @@ RUN if [ -n "${GITHUB_TOKEN}" ]; then \
       curl -L -H "Authorization: token ${GITHUB_TOKEN}" \
         -H "Accept: application/octet-stream" \
         -o "/tmp/$FILENAME" \
-        "https://api.github.com/repos/aws-neuron/torch-neuronx/releases/assets/$ASSET_ID" && \
+        "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/$ASSET_ID" && \
       uv pip install --no-deps "/tmp/$FILENAME" && \
       rm -f "/tmp/$FILENAME" && \
       echo "torch-neuronx installed successfully from dev-wheels release"; \
@@ -50,13 +51,14 @@ RUN if [ -n "${GITHUB_TOKEN}" ]; then \
       exit 1; \
     fi
 
-# ── Clone torch-neuronx repo for test files ──────────────────
+# ── Clone repo for test files ────────────────────────────────
 # Tests reference files from the repo (e.g. conftest.py, specs/)
 # We clone without building since the wheel is already installed.
 RUN if [ -n "${GITHUB_TOKEN}" ]; then \
-      git clone "https://${GITHUB_TOKEN}@github.com/aws-neuron/torch-neuronx.git" \
-        /workspace/torch-neuronx && \
-      echo "torch-neuronx repo cloned to /workspace/torch-neuronx"; \
+      REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2) && \
+      git clone "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+        "/workspace/${REPO_NAME}" && \
+      echo "Repo cloned to /workspace/${REPO_NAME}"; \
     else \
       echo "WARNING: GITHUB_TOKEN not set, skipping repo clone"; \
     fi
