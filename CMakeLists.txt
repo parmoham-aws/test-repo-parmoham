@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+mcmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(torch_neuronx)
 
 # Set C++ standard
@@ -50,12 +50,25 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTORCH_EXTENSION_NAME=_C")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} '-DPYBIND11_COMPILER_TYPE=\"_gcc\"' '-DPYBIND11_STDLIB=\"_libstdcpp\"' '-DPYBIND11_BUILD_ABI=\"_cxxabi1018\"'")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fwrapv -O2")
 
+# Get torch-mlir include path for MLIR headers (used by IrConcatStrategy)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import torch_mlir, os; print(os.path.join(os.path.dirname(torch_mlir.__file__), 'include'))"
+    OUTPUT_VARIABLE TORCH_MLIR_INCLUDE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE TORCH_MLIR_RESULT
+)
+
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/torch_neuronx/csrc)
 include_directories(${NRT_INCLUDE_DIRS})
 include_directories(${TORCH_INCLUDE_DIRS})
 include_directories(${Python3_INCLUDE_DIRS})
+if(TORCH_MLIR_RESULT EQUAL 0 AND TORCH_MLIR_INCLUDE_DIR)
+    include_directories(${TORCH_MLIR_INCLUDE_DIR})
+    message(STATUS "torch-mlir include dir: ${TORCH_MLIR_INCLUDE_DIR}")
+endif()
 
 # Link directories
 link_directories(${NRT_LIBRARY_DIRS})

@@ -39,7 +39,7 @@ StreamImpl *StreamManager::GetStream(c10::DeviceIndex device_index, c10::StreamI
   auto stream_it = device_it->second.find(stream_id);
   if (stream_it == device_it->second.end()) {
     auto stream_impl =
-        std::make_unique<StreamImpl>(device_index, stream_id, 0, operation_execution_engine_);
+        std::make_unique<StreamImpl>(device_index, stream_id);
     auto *stream_ptr = stream_impl.get();
     device_it->second[stream_id] = std::move(stream_impl);
     return stream_ptr;
@@ -63,7 +63,7 @@ c10::StreamId StreamManager::CreateStream(c10::DeviceIndex device_index, int pri
             .first;
   }
   auto stream_impl =
-      std::make_unique<StreamImpl>(device_index, stream_id, priority, operation_execution_engine_);
+      std::make_unique<StreamImpl>(device_index, stream_id);
   device_it->second[stream_id] = std::move(stream_impl);
   return stream_id;
 }
