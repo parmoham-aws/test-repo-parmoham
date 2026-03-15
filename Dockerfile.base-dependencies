@@ -190,6 +190,23 @@ ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
 
 RUN uv pip install -U pip
 
+# ── Install torch into venv (needed for building torch-neuronx C++ extension) ──
+RUN uv pip install torch
+
+# ── Make neuronx-cc and stubs available in the venv ──────────
+# neuronx-cc was installed into system Python; install into venv too
+RUN /opt/torch-neuronx/.venv/bin/pip install neuronx-cc neuronx-cc-stubs nki
+
+# ── Symlink torch-mlir from system Python into the venv ──────
+# torch-mlir was installed into system Python with pip3 install --no-deps
+RUN if [ -d /usr/local/lib/python3.10/dist-packages/torch_mlir ]; then \
+      ln -s /usr/local/lib/python3.10/dist-packages/torch_mlir \
+            /opt/torch-neuronx/.venv/lib/python3.10/site-packages/torch_mlir && \
+      echo "Symlinked torch_mlir into venv"; \
+    else \
+      echo "WARNING: torch_mlir not found in system Python, skipping symlink"; \
+    fi
+
 # ── Install test dependencies ────────────────────────────────
 RUN uv pip install einops boto3
 
