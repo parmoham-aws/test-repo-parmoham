@@ -1,4 +1,4 @@
-mcmake_minimum_required(VERSION 3.18 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(torch_neuronx)
 
 # Set C++ standard
