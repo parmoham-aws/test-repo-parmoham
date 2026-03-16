@@ -50,7 +50,10 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTORCH_EXTENSION_NAME=_C")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} '-DPYBIND11_COMPILER_TYPE=\"_gcc\"' '-DPYBIND11_STDLIB=\"_libstdcpp\"' '-DPYBIND11_BUILD_ABI=\"_cxxabi1018\"'")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -fwrapv -O2")
 
-# Get torch-mlir include path for MLIR headers (used by IrConcatStrategy)
+# Get MLIR include path for MLIR headers (used by IrConcatStrategy)
+# Try multiple locations: torch-mlir Python package, LLVM-18 system path
+set(TORCH_MLIR_INCLUDE_DIR "")
+# 1. Try torch-mlir Python package
 execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import torch_mlir, os; print(os.path.join(os.path.dirname(torch_mlir.__file__), 'include'))"
     OUTPUT_VARIABLE TORCH_MLIR_INCLUDE_DIR
@@ -58,6 +61,14 @@ execute_process(
     ERROR_QUIET
     RESULT_VARIABLE TORCH_MLIR_RESULT
 )
+# 2. Fallback to LLVM-18 system path (from libmlir-18-dev)
+if(NOT TORCH_MLIR_INCLUDE_DIR OR NOT EXISTS "${TORCH_MLIR_INCLUDE_DIR}/mlir/IR/BuiltinOps.h")
+    if(EXISTS "/usr/lib/llvm-18/include/mlir/IR/BuiltinOps.h")
+        set(TORCH_MLIR_INCLUDE_DIR "/usr/lib/llvm-18/include")
+        set(TORCH_MLIR_RESULT 0)
+        message(STATUS "Using LLVM-18 system MLIR headers")
+    endif()
+endif()
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
