@@ -1,17 +1,11 @@
 name: Nightly Base Image Build
 
-# ⚠️ TESTING MODE: build-base is commented out, using hardcoded base image.
-# TODO: Restore build-base job after testing build-nightly-whl flow.
-#
-# Workflow DAG (3-job sequential — normal mode):
+# Workflow DAG (3-job sequential):
 #   build-base (neuron.build-nightly-image)
-#       ↓
+#       ↓ outputs: base_image
 #   build-nightly-whl (neuron.build-nightly-image + neuron.build-nightly-whl)
-#       ↓
-#   promote-to-stable (neuron.tag-nightly-stable)
-#
-# TESTING MODE (current): build-nightly-whl → promote-to-stable
-# Using pre-built base image directly.
+#       ↓ outputs: complete_image, request_id, wheel_filename
+#   promote-to-stable (neuron.tag-nightly-stable + neuron.nightly-whl-stable-release)
 on:
   workflow_dispatch:
 
@@ -19,35 +13,31 @@ permissions:
   contents: read
 
 jobs:
-  # ── Job 1: Build Base Image (COMMENTED OUT FOR TESTING) ────
-  # build-base:
-  #   name: Build Nightly Base Image
-  #   runs-on: [self-hosted, linux, neuron.build-nightly-image]
-  #   timeout-minutes: 120
-  #   outputs:
-  #     base_image: ${{ steps.wait.outputs.image_uri }}
-  #   steps:
-  #     - name: Wait for nightly base image
-  #       id: wait
-  #       run: |
-  #         echo "========================================="
-  #         echo "  Nightly Base Image Build"
-  #         echo "  Branch: ${{ github.ref_name }}"
-  #         echo "  Run ID: ${{ github.run_id }}"
-  #         echo "========================================="
-  #         /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
-  #         IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
-  #         echo "Captured image URI: $IMAGE_URI"
-  #         echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+  # ── Job 1: Build Base Image ────────────────────────────────
+  build-base:
+    name: Build Nightly Base Image
+    runs-on: [self-hosted, linux, neuron.build-nightly-image]
+    timeout-minutes: 120
+    outputs:
+      base_image: ${{ steps.wait.outputs.image_uri }}
+    steps:
+      - name: Wait for nightly base image
+        id: wait
+        run: |
+          echo "========================================="
+          echo "  Nightly Base Image Build"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "========================================="
+          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
+          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
+          echo "Captured image URI: $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
   # ── Job 2: Build Complete Image + Wheel ─────────────────────
-  # TESTING: Using hardcoded base image instead of build-base output.
-  # The neuron.build-nightly-image + neuron.build-nightly-whl labels trigger the
-  # Nightly Image Trigger Lambda with build_wheel=true. CodeBuild runs the repo's
-  # .neuron-ci/build-wheel.sh script, then builds Dockerfile.complete, then uploads the wheel.
   build-nightly-whl:
     name: Build Complete Image + Wheel
-    # needs: [build-base]  # COMMENTED OUT FOR TESTING
+    needs: [build-base]
     runs-on: [
       self-hosted,
       linux,
@@ -55,7 +45,7 @@ jobs:
       neuron.build-nightly-whl,
       neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
-      "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
+      "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
     ]
     timeout-minutes: 120
     outputs:
@@ -67,8 +57,8 @@ jobs:
         id: wait
         run: |
           echo "========================================="
-          echo "  Build Complete Image + Wheel (TESTING)"
-          echo "  Base: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
+          echo "  Build Complete Image + Wheel"
+          echo "  Base: ${{ needs.build-base.outputs.base_image }}"
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
@@ -104,13 +94,13 @@ jobs:
   # ── Job 3: Promote to Stable ───────────────────────────────
   promote-to-stable:
     name: Promote to Stable
-    needs: [build-nightly-whl]  # Removed build-base for testing
+    needs: [build-base, build-nightly-whl]
     if: success()
     runs-on: [
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      "neuron.nightly-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818",
+      "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
       "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
     permissions:
@@ -122,9 +112,7 @@ jobs:
           echo "  Stable Tagging Verification"
           echo "========================================="
 
-          # Use the BASE image URI for stable tagging (Lambda tags the base image, not complete)
-          # TESTING: Hardcoded base image (in production, use ${{ needs.build-base.outputs.base_image }})
-          IMAGE_URI="882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
+          IMAGE_URI="${{ needs.build-base.outputs.base_image }}"
           export NIGHTLY_IMAGE_URI="$IMAGE_URI"
 
           echo "Base image (for stable tag): $NIGHTLY_IMAGE_URI"
@@ -152,11 +140,12 @@ jobs:
       - name: Summary
         run: |
           echo "========================================="
-          echo "  ✓ Nightly Build Complete (TESTING)"
+          echo "  ✓ Nightly Build Complete"
           echo "========================================="
-          echo "  Base image:     882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818 (hardcoded)"
+          echo "  Base image:     ${{ needs.build-base.outputs.base_image }}"
           echo "  Complete image: ${{ needs.build-nightly-whl.outputs.complete_image }}"
+          echo "  Wheel:          ${{ needs.build-nightly-whl.outputs.wheel_filename }}"
           echo ""
           echo "  ECR stable tag: applied"
-          echo "  GitHub Release: stable-wheels"
+          echo "  GitHub Release: stable-wheels (via Lambda)"
           echo "========================================="
