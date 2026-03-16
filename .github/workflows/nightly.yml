@@ -60,6 +60,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       complete_image: ${{ steps.wait.outputs.image_uri }}
+      wheel_filename: ${{ steps.wait.outputs.wheel_filename }}
     steps:
       - name: Wait for complete image + wheel build
         id: wait
@@ -81,6 +82,15 @@ jobs:
           echo "Captured complete image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
+          # Extract wheel filename from the build API response (if available)
+          WHEEL_FILENAME=$(grep "Nightly wheel filename:" /tmp/complete-output.log | sed 's/.*filename: //')
+          if [ -n "$WHEEL_FILENAME" ]; then
+            echo "Captured wheel filename: $WHEEL_FILENAME"
+            echo "wheel_filename=$WHEEL_FILENAME" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: No wheel filename found in build output"
+          fi
+
   # ── Job 3: Promote to Stable ───────────────────────────────
   promote-to-stable:
     name: Promote to Stable
@@ -90,7 +100,7 @@ jobs:
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      "neuron.nightly-image:${{ needs.build-nightly-whl.outputs.complete_image }}"
+      "neuron.nightly-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
     ]
     permissions:
       contents: write
@@ -101,10 +111,12 @@ jobs:
           echo "  Stable Tagging Verification"
           echo "========================================="
 
-          IMAGE_URI="${{ needs.build-nightly-whl.outputs.complete_image }}"
+          # Use the BASE image URI for stable tagging (Lambda tags the base image, not complete)
+          # TESTING: Hardcoded base image (in production, use ${{ needs.build-base.outputs.base_image }})
+          IMAGE_URI="882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
           export NIGHTLY_IMAGE_URI="$IMAGE_URI"
 
-          echo "Complete image: $NIGHTLY_IMAGE_URI"
+          echo "Base image (for stable tag): $NIGHTLY_IMAGE_URI"
 
           /opt/neuron-ci/verify-stable-tag.sh
 
@@ -118,10 +130,20 @@ jobs:
           echo "  Wheel Stable Promotion"
           echo "========================================="
 
+          WHEEL_FILENAME="${{ needs.build-nightly-whl.outputs.wheel_filename }}"
           echo "Downloading wheel from dev-wheels release..."
           mkdir -p /tmp/stable-dist
+
+          if [ -n "$WHEEL_FILENAME" ]; then
+            echo "Using specific wheel filename: $WHEEL_FILENAME"
+            PATTERN="$WHEEL_FILENAME"
+          else
+            echo "WARNING: No specific wheel filename, falling back to *.whl"
+            PATTERN="*.whl"
+          fi
+
           gh release download dev-wheels \
-            --pattern "*.whl" \
+            --pattern "$PATTERN" \
             --dir /tmp/stable-dist \
             --repo "${{ github.repository }}" || {
             echo "WARNING: No wheel found in dev-wheels release. Skipping wheel promotion."
