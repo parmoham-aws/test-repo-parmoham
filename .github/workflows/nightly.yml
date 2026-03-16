@@ -4,9 +4,9 @@ name: Nightly Base Image Build
 # TODO: Restore build-base job after testing build-nightly-whl flow.
 #
 # Workflow DAG (3-job sequential — normal mode):
-#   build-base (neuron.build-nightly)
+#   build-base (neuron.build-nightly-image)
 #       ↓
-#   build-nightly-whl (neuron.build-nightly-whl)
+#   build-nightly-whl (neuron.build-nightly-image + neuron.build-nightly-whl)
 #       ↓
 #   promote-to-stable (neuron.tag-nightly-stable)
 #
@@ -22,7 +22,7 @@ jobs:
   # ── Job 1: Build Base Image (COMMENTED OUT FOR TESTING) ────
   # build-base:
   #   name: Build Nightly Base Image
-  #   runs-on: [self-hosted, linux, neuron.build-nightly]
+  #   runs-on: [self-hosted, linux, neuron.build-nightly-image]
   #   timeout-minutes: 120
   #   outputs:
   #     base_image: ${{ steps.wait.outputs.image_uri }}
@@ -42,14 +42,16 @@ jobs:
 
   # ── Job 2: Build Complete Image + Wheel ─────────────────────
   # TESTING: Using hardcoded base image instead of build-base output.
-  # The neuron.build-nightly-whl label triggers the Nightly Image Trigger Lambda
-  # with build_wheel=true, which tells CodeBuild to also build + upload the wheel.
+  # The neuron.build-nightly-image + neuron.build-nightly-whl labels trigger the
+  # Nightly Image Trigger Lambda with build_wheel=true. CodeBuild runs the repo's
+  # .neuron-ci/build-wheel.sh script, then builds Dockerfile.complete, then uploads the wheel.
   build-nightly-whl:
     name: Build Complete Image + Wheel
     # needs: [build-base]  # COMMENTED OUT FOR TESTING
     runs-on: [
       self-hosted,
       linux,
+      neuron.build-nightly-image,
       neuron.build-nightly-whl,
       "neuron.dockerfile:Dockerfile.complete",
       "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
