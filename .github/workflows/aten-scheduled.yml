@@ -1,7 +1,7 @@
 name: ATen Tests (Scheduled)
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 8 * * *'  # Midnight PST (UTC-8)
 permissions:
   contents: read
 env:
