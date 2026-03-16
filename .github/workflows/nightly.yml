@@ -53,6 +53,7 @@ jobs:
       linux,
       neuron.build-nightly-image,
       neuron.build-nightly-whl,
+      neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
       "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
     ]
