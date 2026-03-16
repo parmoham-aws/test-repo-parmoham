@@ -60,6 +60,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       complete_image: ${{ steps.wait.outputs.image_uri }}
+      request_id: ${{ steps.wait.outputs.request_id }}
       wheel_filename: ${{ steps.wait.outputs.wheel_filename }}
     steps:
       - name: Wait for complete image + wheel build
@@ -82,6 +83,15 @@ jobs:
           echo "Captured complete image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
+          # Extract request_id from the polling output (for wheel promotion)
+          REQUEST_ID=$(grep "Found request ID:" /tmp/complete-output.log | sed 's/.*ID: //')
+          if [ -n "$REQUEST_ID" ]; then
+            echo "Captured request ID: $REQUEST_ID"
+            echo "request_id=$REQUEST_ID" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: No request ID found in build output"
+          fi
+
           # Extract wheel filename from the build API response (if available)
           WHEEL_FILENAME=$(grep "Nightly wheel filename:" /tmp/complete-output.log | sed 's/.*filename: //')
           if [ -n "$WHEEL_FILENAME" ]; then
@@ -100,7 +110,8 @@ jobs:
       self-hosted,
       linux,
       neuron.tag-nightly-stable,
-      "neuron.nightly-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818"
+      "neuron.nightly-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-nightly-base-20260313-172818",
+      "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
     permissions:
       contents: write
@@ -122,67 +133,21 @@ jobs:
 
           echo "✓ ECR stable tagging complete"
 
-      - name: Promote wheel to stable-wheels
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Wheel promotion status
         run: |
           echo "========================================="
-          echo "  Wheel Stable Promotion"
+          echo "  Wheel Stable Promotion (Lambda-based)"
           echo "========================================="
-
-          WHEEL_FILENAME="${{ needs.build-nightly-whl.outputs.wheel_filename }}"
-          echo "Downloading wheel from dev-wheels release..."
-          mkdir -p /tmp/stable-dist
-
-          if [ -n "$WHEEL_FILENAME" ]; then
-            echo "Using specific wheel filename: $WHEEL_FILENAME"
-            PATTERN="$WHEEL_FILENAME"
-          else
-            echo "WARNING: No specific wheel filename, falling back to *.whl"
-            PATTERN="*.whl"
-          fi
-
-          gh release download dev-wheels \
-            --pattern "$PATTERN" \
-            --dir /tmp/stable-dist \
-            --repo "${{ github.repository }}" || {
-            echo "WARNING: No wheel found in dev-wheels release. Skipping wheel promotion."
-            exit 0
-          }
-
-          WHL_FILE=$(ls /tmp/stable-dist/*.whl 2>/dev/null | head -1)
-          if [ -z "$WHL_FILE" ]; then
-            echo "WARNING: No wheel file downloaded. Skipping wheel promotion."
-            exit 0
-          fi
-
-          WHL_FILENAME=$(basename "$WHL_FILE")
-          WHL_SHA256=$(sha256sum "$WHL_FILE" | cut -d' ' -f1)
-          echo "Wheel: $WHL_FILENAME"
-          echo "SHA256: $WHL_SHA256"
-          echo "✓ SHA256 computed"
-
-          echo "Uploading wheel to stable-wheels release..."
-
-      - name: Release wheel to stable-wheels
-        if: success()
-        uses: ncipollo/release-action@v1
-        with:
-          artifacts: /tmp/stable-dist/*.whl
-          tag: "stable-wheels"
-          name: "Stable Wheels (Latest Validated)"
-          body: |
-            Latest validated private-torch-neuronx wheel.
-
-            Branch: `${{ github.ref_name }}`
-            Run: ${{ github.run_id }}
-
-            Promoted from dev-wheels after successful nightly validation.
-            Built from commit: ${{ github.sha }}
-          allowUpdates: true
-          replacesArtifacts: true
-          makeLatest: false
-          token: ${{ secrets.GITHUB_TOKEN }}
+          echo "  Wheel promotion is handled by the Nightly Wheel Promoter Lambda."
+          echo "  The webhook detected neuron.nightly-whl-stable-release: label"
+          echo "  and invoked the Lambda asynchronously to:"
+          echo "    1. Download wheel from S3 (using request_id: ${{ needs.build-nightly-whl.outputs.request_id }})"
+          echo "    2. Upload to GitHub Release 'stable-wheels'"
+          echo ""
+          echo "  Wheel filename: ${{ needs.build-nightly-whl.outputs.wheel_filename }}"
+          echo "  Request ID: ${{ needs.build-nightly-whl.outputs.request_id }}"
+          echo "  Check Lambda logs: /aws/lambda/neuron-nightly-whl-promoter-*"
+          echo "========================================="
 
       - name: Summary
         run: |
