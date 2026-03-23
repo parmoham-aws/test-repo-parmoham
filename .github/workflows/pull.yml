@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
@@ -16,7 +17,7 @@ env:
   AWS_DEFAULT_REGION: us-west-2
 jobs:
   hello-world:
-    name: Hello World Smoke Test
+    name: Hello World Smoke Test 123
     runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
     steps:
       - name: Smoke Test
@@ -56,7 +57,51 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: aten-test-results
+          name: kaizen-aten-test-results
+          path: |
+            outputs/
+            *.html
+            *.xml
+          retention-days: 30
+
+  torchneumronx-aten-tests:
+    name: TorchNeuronX Kaizen ATen Unit Tests
+    runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print Neuron Info
+        run: |
+          echo "============================================="
+          echo "       NEURON ENVIRONMENT INFO               "
+          echo "============================================="
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
+
+      - name: Install Dependencies and Run ATen Unit Tests
+        env:
+          NEURON_LAUNCH_BLOCKING: "1"
+        run: |
+          # New image has repo at /opt/torch-neuronx (not /workspace/private-neuron-integration-dev)
+          cd /opt/torch-neuronx
+          pip install --index-url https://pypi.org/simple pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov expecttest
+          echo "============================================="
+          echo "           RUNNING ATEN UNIT TESTS           "
+          echo "============================================="
+          mkdir -p outputs/test-reports
+          ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          echo "============================================="
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaizen-aten-test-results-torchneumronx
           path: |
             outputs/
             *.html

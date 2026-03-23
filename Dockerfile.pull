@@ -1,0 +1,105 @@
+# ============================================================
+# Dockerfile.pull for PR builds in private-neuron-integration-dev
+# 
+# PURPOSE:
+# This Dockerfile is used by the PR image build workflow to create
+# Docker images containing torch-neuronx code from pull requests.
+# It uses a pre-built nightly base image to dramatically reduce build time.
+#
+# ============================================================
+
+ARG BASE_IMAGE_URI=882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-stable
+FROM ${BASE_IMAGE_URI}
+
+# Build arguments (provided by Image Trigger Lambda → Build Trigger Handler → CodeBuild)
+ARG GITHUB_AUTH_B64=""
+ARG PR_NUMBER=""
+ARG GITHUB_REPOSITORY=""
+ARG HEAD_SHA=""
+ARG REPO_NAME=""
+
+
+WORKDIR /workspace
+
+COPY ${REPO_NAME}/ /opt/torch-neuronx-pr/
+
+# ============================================================
+# Clone and checkout PR inside Dockerfile 
+# ============================================================
+# Use this approach for actual torch-neuronx PRs when you want to
+# clone directly in the Dockerfile instead of using buildspec.
+#
+# Uncomment the section below and comment out APPROACH 1 above.
+#
+# SECURITY WARNING: This approach exposes GITHUB_TOKEN in Docker layers!
+# Only use for local testing or when security is not a concern.
+# ============================================================
+#
+# # Clone torch-neuronx and checkout specific PR for testing
+# RUN echo "========================================" \
+#     && echo "Installing torch-neuronx from PR #${PR_NUMBER}..." \
+#     && echo "Repository: https://github.com/aws-neuron/private-torch-neuronx" \
+#     && echo "========================================" \
+#     && cd /opt \
+#     && if [ -n "${GITHUB_TOKEN}" ]; then \
+#          echo "Using GitHub token for authentication..."; \
+#          git clone https://${GITHUB_TOKEN}@github.com/aws-neuron/private-torch-neuronx.git torch-neuronx-pr; \
+#        else \
+#          echo "No GitHub token provided, attempting public clone..."; \
+#          git clone https://github.com/aws-neuron/private-torch-neuronx.git torch-neuronx-pr; \
+#        fi \
+#     && cd torch-neuronx-pr \
+#     && echo "Fetching PR #${PR_NUMBER}..." \
+#     && git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER} \
+#     && echo "Checking out PR #${PR_NUMBER}..." \
+#     && git checkout pr-${PR_NUMBER} \
+#     && echo "Current commit: $(git rev-parse HEAD)" \
+#     && echo "Current branch: $(git branch --show-current)" \
+#     && echo "✓ Repository cloned and PR checked out successfully"
+#
+# # Note: When using APPROACH 2, you'll need to:
+# # 1. Pass GITHUB_TOKEN as a build arg (not GITHUB_AUTH_B64)
+# # 2. Update the Image Trigger Lambda to provide GITHUB_TOKEN
+# # 3. Remove the buildspec git clone step (Docker does it instead)
+# # 4. Accept the security risk of token exposure in Docker layers
+#
+# ============================================================
+
+# ── Build torch-neuronx from PR code ─────────────────────────
+WORKDIR /opt/torch-neuronx-pr
+
+# Make scripts executable
+RUN chmod +x ./tools/* && \
+    chmod +x ./tests/pytorch_tests/*.sh || true
+
+# Activate the venv that was created in nightly-base
+# This venv already has all dependencies:
+# - torch-mlir (from private release)
+# - neuronx_cc, nki (from authenticated pip repo)
+# - einops, boto3 (test dependencies)
+ENV UV_PROJECT_ENVIRONMENT=/opt/torch-neuronx/.venv
+ENV PATH="/opt/torch-neuronx/.venv/bin:/opt/aws/neuron/bin:$PATH"
+ENV NRT_LOCAL_PATH="/opt/aws/neuron"
+ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
+
+# Install torch-neuronx in editable mode and build with Bazel
+# This is the only time-consuming step (~10-15 minutes)
+# Everything else is already in the base image
+RUN uv pip install -e .[dev] && \
+    ./tools/build
+
+# ── Verify installation ──────────────────────────────────────
+RUN echo "========================================" && \
+    echo "Verifying torch-neuronx PR build..." && \
+    echo "========================================" && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" && \
+    ls -la /opt/torch-neuronx-pr/torch_neuronx/_C*.so && \
+    pip list | grep -i neuron && \
+    echo "========================================" && \
+    echo "✓ PR build verification complete!" && \
+    echo "========================================"
+
+# Set working directory for test execution
+# Tests will run from the PR code directory
+WORKDIR /opt/torch-neuronx-pr
+CMD ["/bin/bash"]
