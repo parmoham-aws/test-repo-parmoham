@@ -39,29 +39,56 @@ if [ -z "$OUTPUT_DIR" ]; then
   exit 1
 fi
 
-# Clone private-torch-neuronx repo on the CodeBuild host
-# Use the same GitHub auth that CodeBuild provides for the main repo
+# Clone private-torch-neuronx repo on the CodeBuild host with fallback logic
 TORCH_NEURON_DIR="$(pwd)/private-torch-neuronx"
+CLONE_SUCCESS=false
+
+# Method 1: Try GitHub App token first (BUILD_ARG_GITHUB_AUTH_B64)
 if [ -n "$BUILD_ARG_GITHUB_AUTH_B64" ]; then
-  echo "Cloning $TORCH_NEURON_REPO using GitHub auth..."
+  echo "=== Attempting clone using GitHub App token (BUILD_ARG_GITHUB_AUTH_B64) ==="
   echo '#!/bin/sh' > /tmp/git-askpass-torch.sh
   echo 'echo "$BUILD_ARG_GITHUB_AUTH_B64" | base64 -d | cut -d: -f2-' >> /tmp/git-askpass-torch.sh
   chmod +x /tmp/git-askpass-torch.sh
-  GIT_ASKPASS=/tmp/git-askpass-torch.sh GIT_TERMINAL_PROMPT=0 \
+  
+  if GIT_ASKPASS=/tmp/git-askpass-torch.sh GIT_TERMINAL_PROMPT=0 \
     git clone --depth=50 --branch "$TORCH_NEURON_BRANCH" \
-    "https://x-access-token@github.com/${TORCH_NEURON_REPO}.git" "$TORCH_NEURON_DIR"
+    "https://x-access-token@github.com/${TORCH_NEURON_REPO}.git" "$TORCH_NEURON_DIR" 2>&1; then
+    echo "SUCCESS: Cloned $TORCH_NEURON_REPO using GitHub App token"
+    CLONE_SUCCESS=true
+  else
+    echo "FAILED: GitHub App token clone failed (exit $?)"
+    echo "GitHub App may not have access to $TORCH_NEURON_REPO"
+    rm -rf "$TORCH_NEURON_DIR" 2>/dev/null || true
+  fi
   rm -f /tmp/git-askpass-torch.sh
-elif [ -n "$BUILD_ARG_GITHUB_TOKEN" ]; then
-  echo "Cloning $TORCH_NEURON_REPO using GITHUB_TOKEN..."
-  git clone --depth=50 --branch "$TORCH_NEURON_BRANCH" \
-    "https://${BUILD_ARG_GITHUB_TOKEN}@github.com/${TORCH_NEURON_REPO}.git" "$TORCH_NEURON_DIR"
 else
-  echo "WARNING: No GitHub auth available, trying unauthenticated clone..."
-  git clone --depth=50 --branch "$TORCH_NEURON_BRANCH" \
-    "https://github.com/${TORCH_NEURON_REPO}.git" "$TORCH_NEURON_DIR"
+  echo "INFO: BUILD_ARG_GITHUB_AUTH_B64 not available, skipping GitHub App token method"
 fi
 
-echo "Cloned private-torch-neuronx at $(cd "$TORCH_NEURON_DIR" && git rev-parse HEAD)"
+# Method 2: Fallback to config table token (BUILD_ARG_GITHUB_TOKEN)
+if [ "$CLONE_SUCCESS" = "false" ] && [ -n "$BUILD_ARG_GITHUB_TOKEN" ]; then
+  echo "=== Attempting fallback clone using config table token (BUILD_ARG_GITHUB_TOKEN) ==="
+  if git clone --depth=50 --branch "$TORCH_NEURON_BRANCH" \
+    "https://${BUILD_ARG_GITHUB_TOKEN}@github.com/${TORCH_NEURON_REPO}.git" "$TORCH_NEURON_DIR" 2>&1; then
+    echo "SUCCESS: Cloned $TORCH_NEURON_REPO using config table token"
+    CLONE_SUCCESS=true
+  else
+    echo "FAILED: Config table token clone also failed (exit $?)"
+    echo "Config table token may not have access to $TORCH_NEURON_REPO"
+    rm -rf "$TORCH_NEURON_DIR" 2>/dev/null || true
+  fi
+else
+  if [ "$CLONE_SUCCESS" = "false" ]; then
+    echo "INFO: BUILD_ARG_GITHUB_TOKEN not available, skipping config table token method"
+  fi
+fi
+
+if [ "$CLONE_SUCCESS" = "true" ]; then
+  echo "Cloned private-torch-neuronx at $(cd "$TORCH_NEURON_DIR" && git rev-parse HEAD)"
+else
+  echo "ERROR: Failed to clone $TORCH_NEURON_REPO using any available method"
+  exit 1
+fi
 
 # Pull the base image (has torch headers, neuronxcc, cmake, etc.)
 docker pull "$BASE_IMAGE"
