@@ -117,7 +117,8 @@ docker run --rm \
     echo "Pip: $(which pip)"
 
     # Verify torch is available (needed for C++ extension headers)
-    python -c "import torch; print(f\"torch {torch.__version__} at {torch.__path__[0]}\")" \
+    # Disable backend autoload to avoid broken torch_neuronx import in base image
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c "import torch; print(f\"torch {torch.__version__} at {torch.__path__[0]}\")" \
       || { echo "ERROR: torch not found"; exit 1; }
 
     echo "Copying repo to writable temp dir..."
@@ -129,7 +130,8 @@ docker run --rm \
 
     # Build the wheel using setup.py (PyTorch CppExtension for C++ code)
     # No USE_CMAKE needed — private-torch-neuronx only supports CppExtension
-    pip wheel --no-deps --no-build-isolation -w /output .
+    # Disable backend autoload to avoid broken torch_neuronx import during build
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 pip wheel --no-deps --no-build-isolation -w /output .
 
     echo "=== Wheel built successfully ==="
     ls -la /output/*.whl
