@@ -10,7 +10,7 @@ env:
 jobs:
   aten-unit-tests:
     name: ATen Unit Tests (trn1)
-    runs-on: [self-hosted, linux, neuron, neuron.kaizen, neuron.build-image]
+    runs-on: [self-hosted, linux, neuron, neuron.internal_compute, neuron.build-image]
     timeout-minutes: 240
     steps:
       - name: Checkout
