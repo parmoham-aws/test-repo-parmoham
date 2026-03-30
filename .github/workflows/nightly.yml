@@ -16,7 +16,7 @@ jobs:
   # ── Job 1: Build Base Image ────────────────────────────────
   build-base:
     name: Build Nightly Base Image
-    runs-on: [self-hosted, linux, neuron.build-nightly-image]
+    runs-on: [self-hosted, linux, neuron.build-nightly-image, "neuron.run-${{ github.run_id }}-${{ github.job }}"]
     timeout-minutes: 120
     outputs:
       base_image: ${{ steps.wait.outputs.image_uri }}
@@ -45,6 +45,7 @@ jobs:
       neuron.build-nightly-whl,
       neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
+      "neuron.run-${{ github.run_id }}-${{ github.job }}",
       "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
     ]
     timeout-minutes: 120
@@ -101,6 +102,7 @@ jobs:
       linux,
       neuron.tag-nightly-stable,
       "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
+      "neuron.run-${{ github.run_id }}-${{ github.job }}",
       "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
     permissions:
@@ -163,7 +165,8 @@ jobs:
       neuron.internal_compute:trn2.48xlarge,
       neuron.build-image,
       "neuron.run-${{ github.run_id }}-${{ github.job }}",
-      "neuron.image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-tests-nightly-base-20260328-220417"
+      "neuron.image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-tests-nightly-base-20260328-220417",
+      "neuron.run-${{ github.run_id }}-${{ github.job }}"
     ]
     timeout-minutes: 360
     strategy:
