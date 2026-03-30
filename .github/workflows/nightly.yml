@@ -163,7 +163,6 @@ jobs:
       neuron,
       neuron.internal_compute,
       neuron.internal_compute:trn2.48xlarge,
-      neuron.build-image,
       "neuron.run-${{ github.run_id }}-upstream-aten-tests",
       "neuron.image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-tests-nightly-base-20260328-220417"
     ]
