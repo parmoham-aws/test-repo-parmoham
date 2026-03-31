@@ -18,7 +18,7 @@ jobs:
       linux,
       neuron.build-image,
       "neuron.dockerfile:Dockerfile.nightly-test",
-      "neuron.base-image:048894428923.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-private:private-neuron-integration-dev-nightly-nightly-base-stable",
+      "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-private:private-neuron-integration-dev-nightly-nightly-base-stable",
       "neuron.run-${{ github.run_id }}-build-test-image"
     ]
     timeout-minutes: 120
