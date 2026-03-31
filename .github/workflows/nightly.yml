@@ -1,11 +1,10 @@
 name: Nightly Base Image Build
 
-# Workflow DAG (3-job sequential):
-#   build-base (neuron.build-nightly-image)
-#       ↓ outputs: base_image
-#   build-nightly-whl (neuron.build-nightly-image + neuron.build-nightly-whl)
-#       ↓ outputs: complete_image, request_id, wheel_filename
-#   promote-to-stable (neuron.tag-nightly-stable + neuron.nightly-whl-stable-release)
+# Workflow DAG:
+#   build-base (Dockerfile.base-dependencies)
+#     ├── build-main-image (Dockerfile.main) → upstream-aten-tests
+#     ├── build-nightly-whl (Dockerfile.complete + wheel) ─────────────────────┐
+#     └────────────────────────────────────────────────────────────────────────→ promote-to-stable
 on:
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ jobs:
   # ── Job 1: Build Base Image ────────────────────────────────
   build-base:
     name: Build Nightly Base Image
-    runs-on: [self-hosted, linux, neuron.build-nightly-image, "neuron.run-${{ github.run_id }}-${{ github.job }}"]
+    runs-on: [self-hosted, linux, neuron.build-nightly-image, "neuron.run-${{ github.run_id }}-build-base"]
     timeout-minutes: 120
     outputs:
       base_image: ${{ steps.wait.outputs.image_uri }}
@@ -45,7 +44,7 @@ jobs:
       neuron.build-nightly-whl,
       neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
-      "neuron.run-${{ github.run_id }}-${{ github.job }}",
+      "neuron.run-${{ github.run_id }}-build-nightly-whl",
       "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
     ]
     timeout-minutes: 120
@@ -102,7 +101,7 @@ jobs:
       linux,
       neuron.tag-nightly-stable,
       "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
-      "neuron.run-${{ github.run_id }}-${{ github.job }}",
+      "neuron.run-${{ github.run_id }}-promote-to-stable",
       "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
     permissions:
@@ -152,11 +151,46 @@ jobs:
           echo "  GitHub Release: stable-wheels (via Lambda)"
           echo "========================================="
 
-  # ── Job 4: Upstream ATen Tests (hardcoded image, parallel to everything) ──
-  # Uses a pre-built image directly — no dependency on build-base or build-main-image.
-  # This runs completely in parallel with the build+promote pipeline.
+  # ── Job 4: Build Main Test Image (Dockerfile.main) ─────────
+  # Builds on top of base image, adds test dependencies and repo code.
+  # Uses neuron.build-nightly-image (nightly Lambda), NOT neuron.build-image (PR Lambda).
+  build-main-image:
+    name: Build Main Test Image
+    needs: [build-base]
+    if: always() && needs.build-base.result == 'success'
+    runs-on: [
+      self-hosted,
+      linux,
+      neuron.build-nightly-image,
+      "neuron.run-${{ github.run_id }}-build-main-image",
+      "neuron.dockerfile:Dockerfile.main",
+      "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
+    ]
+    timeout-minutes: 120
+    outputs:
+      main_image: ${{ steps.wait.outputs.image_uri }}
+    steps:
+      - name: Wait for main test image build
+        id: wait
+        run: |
+          echo "========================================="
+          echo "  Build Main Test Image"
+          echo "  Base: ${{ needs.build-base.outputs.base_image }}"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "========================================="
+          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/main-output.log
+          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/main-output.log | sed 's/.*ready: //')
+          echo "Main test image ready: $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+  # ── Job 5: Upstream ATen Tests ─────────────────────────────
+  # Uses the dynamically-built main image via neuron.image: label.
+  # No build labels — the image is already built by build-main-image.
   upstream-aten-tests:
     name: Upstream ATen Node ${{ matrix.node }}
+    needs: [build-main-image]
+    if: always() && needs.build-main-image.result == 'success'
     runs-on: [
       self-hosted,
       linux,
@@ -164,7 +198,7 @@ jobs:
       neuron.internal_compute,
       neuron.internal_compute:trn2.48xlarge,
       "neuron.run-${{ github.run_id }}-upstream-aten-tests",
-      "neuron.image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-whl-tests-nightly-base-20260328-220417"
+      "neuron.image:${{ needs.build-main-image.outputs.main_image }}"
     ]
     timeout-minutes: 360
     strategy:
@@ -192,71 +226,3 @@ jobs:
           name: upstream-aten-node-${{ matrix.node }}
           path: /tmp/upstream_aten_artifacts/
           retention-days: 30
-
-  # ── (Commented out) Build Main Test Image + Dynamic Tests ──
-  # Uncomment below to use dynamically-built image from build-base instead of hardcoded image.
-  # build-main-image:
-  #   name: Build Main Test Image
-  #   needs: [build-base]
-  #   if: always() && needs.build-base.result == 'success'
-  #   runs-on: [
-  #     self-hosted,
-  #     linux,
-  #     neuron.build-nightly-image,
-  #     "neuron.dockerfile:Dockerfile.main",
-  #     "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
-  #   ]
-  #   timeout-minutes: 120
-  #   outputs:
-  #     main_image: ${{ steps.wait.outputs.image_uri }}
-  #   steps:
-  #     - name: Wait for main image build
-  #       id: wait
-  #       run: |
-  #         echo "========================================="
-  #         echo "  Build Main Test Image"
-  #         echo "  Base: ${{ needs.build-base.outputs.base_image }}"
-  #         echo "  Branch: ${{ github.ref_name }}"
-  #         echo "  Run ID: ${{ github.run_id }}"
-  #         echo "========================================="
-  #         /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/main-output.log
-  #         IMAGE_URI=$(grep "Nightly base image ready:" /tmp/main-output.log | sed 's/.*ready: //')
-  #         echo "Main test image ready: $IMAGE_URI"
-  #         echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-  #
-  # upstream-aten-tests-dynamic:
-  #   name: Upstream ATen Node ${{ matrix.node }}
-  #   needs: [build-main-image]
-  #   if: always() && needs.build-main-image.result == 'success'
-  #   runs-on: [
-  #     self-hosted,
-  #     linux,
-  #     neuron,
-  #     neuron.internal_compute,
-  #     neuron.internal_compute:trn2.48xlarge,
-  #     "neuron.image:${{ needs.build-main-image.outputs.main_image }}"
-  #   ]
-  #   timeout-minutes: 360
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       include:
-  #         - node: 0
-  #           classes: "TestLikeTensorCreation"
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #     - name: Run upstream ATen tests
-  #       run: |
-  #         export TEST_RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-  #         ./tests/pytorch_tests/run_upstream_aten_tests.sh \
-  #           --output-dir /tmp/upstream_aten_artifacts \
-  #           --total-timeout 21600 \
-  #           ${{ matrix.classes }}
-  #     - name: Upload results
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: upstream-aten-node-${{ matrix.node }}
-  #         path: /tmp/upstream_aten_artifacts/
-  #         retention-days: 30

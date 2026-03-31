@@ -128,6 +128,11 @@ RUN python -m pip install cmake ninja
 RUN python -m pip install mkl-static mkl-include
 
 # ── Bazelisk ─────────────────────────────────────────────────
+# Set BAZELISK_BASE_URL before `bazel --version` so Bazelisk downloads
+# Bazel from GitHub (reachable) instead of GCS (blocked by DNS firewall).
+# Pin USE_BAZEL_VERSION to avoid querying any API for "latest".
+ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
+ENV USE_BAZEL_VERSION=7.4.1
 RUN cd /tmp && \
     wget https://github.com/bazelbuild/bazelisk/releases/download/v1.19.0/bazelisk-linux-amd64 && \
     chmod +x bazelisk-linux-amd64 && \
@@ -186,7 +191,6 @@ RUN mkdir -p /opt/torch-neuronx && \
 ENV UV_PROJECT_ENVIRONMENT=/opt/torch-neuronx/.venv
 ENV PATH="/opt/torch-neuronx/.venv/bin:/opt/aws/neuron/bin:$PATH"
 ENV NRT_LOCAL_PATH="/opt/aws/neuron"
-ENV BAZELISK_BASE_URL=https://github.com/bazelbuild/bazel/releases/download
 
 RUN uv pip install -U pip
 
