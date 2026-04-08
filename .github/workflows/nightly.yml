@@ -15,7 +15,7 @@ jobs:
   # ── Job 1: Build Base Image ────────────────────────────────
   build-base:
     name: Build Nightly Base Image
-    runs-on: [self-hosted, linux, neuron.build-nightly-image, "neuron.run-${{ github.run_id }}-build-base"]
+    runs-on: [self-hosted, linux, neuron.build-image, "neuron.run-${{ github.run_id }}-build-base"]
     timeout-minutes: 120
     outputs:
       base_image: ${{ steps.wait.outputs.image_uri }}
@@ -28,8 +28,7 @@ jobs:
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
-          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/nightly-output.log
-          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/nightly-output.log | sed 's/.*ready: //')
+          IMAGE_URI=$(/opt/neuron-ci/wait-for-image.sh)
           echo "Captured image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
@@ -40,8 +39,8 @@ jobs:
     runs-on: [
       self-hosted,
       linux,
-      neuron.build-nightly-image,
-      neuron.build-nightly-whl,
+      neuron.build-image,
+      neuron.build-wheel,
       neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
       "neuron.run-${{ github.run_id }}-build-nightly-whl",
@@ -63,17 +62,15 @@ jobs:
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
 
-          # Call the polling script installed by EC2 user data
+          # Call the unified wait-for-image.sh polling script
           # This blocks until the complete image build finishes
           # CodeBuild also builds the wheel and uploads to dev-wheels release
-          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/complete-output.log
-
-          # Extract IMAGE_URI from the success message
-          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/complete-output.log | sed 's/.*ready: //')
+          # stdout = image URI only; stderr = verbose logs (captured for metadata extraction)
+          IMAGE_URI=$(/opt/neuron-ci/wait-for-image.sh 2>/tmp/complete-output.log)
           echo "Captured complete image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-          # Extract request_id from the polling output (for wheel promotion)
+          # Extract request_id from stderr log (for wheel promotion)
           REQUEST_ID=$(grep "Found request ID:" /tmp/complete-output.log | sed 's/.*ID: //')
           if [ -n "$REQUEST_ID" ]; then
             echo "Captured request ID: $REQUEST_ID"
@@ -82,8 +79,8 @@ jobs:
             echo "WARNING: No request ID found in build output"
           fi
 
-          # Extract wheel filename from the build API response (if available)
-          WHEEL_FILENAME=$(grep "Nightly wheel filename:" /tmp/complete-output.log | sed 's/.*filename: //')
+          # Extract wheel filename from stderr log (if available)
+          WHEEL_FILENAME=$(grep "Wheel:" /tmp/complete-output.log | sed 's/.*Wheel: //')
           if [ -n "$WHEEL_FILENAME" ]; then
             echo "Captured wheel filename: $WHEEL_FILENAME"
             echo "wheel_filename=$WHEEL_FILENAME" >> $GITHUB_OUTPUT
@@ -99,8 +96,8 @@ jobs:
     runs-on: [
       self-hosted,
       linux,
-      neuron.tag-nightly-stable,
-      "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
+      neuron.tag-stable,
+      "neuron.image:${{ needs.build-base.outputs.base_image }}",
       "neuron.run-${{ github.run_id }}-promote-to-stable",
       "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
@@ -153,7 +150,7 @@ jobs:
 
   # ── Job 4: Build Main Test Image (Dockerfile.main) ─────────
   # Builds on top of base image, adds test dependencies and repo code.
-  # Uses neuron.build-nightly-image (nightly Lambda), NOT neuron.build-image (PR Lambda).
+  # Uses neuron.build-image (unified Lambda) with dockerfile override.
   build-main-image:
     name: Build Main Test Image
     needs: [build-base]
@@ -161,7 +158,7 @@ jobs:
     runs-on: [
       self-hosted,
       linux,
-      neuron.build-nightly-image,
+      neuron.build-image,
       "neuron.run-${{ github.run_id }}-build-main-image",
       "neuron.dockerfile:Dockerfile.main",
       "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
@@ -179,8 +176,7 @@ jobs:
           echo "  Branch: ${{ github.ref_name }}"
           echo "  Run ID: ${{ github.run_id }}"
           echo "========================================="
-          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/main-output.log
-          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/main-output.log | sed 's/.*ready: //')
+          IMAGE_URI=$(/opt/neuron-ci/wait-for-image.sh)
           echo "Main test image ready: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
