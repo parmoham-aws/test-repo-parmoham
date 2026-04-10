@@ -23,6 +23,7 @@ jobs:
       - name: Wait for nightly base image
         id: wait
         run: |
+          set -eo pipefail
           echo "========================================="
           echo "  Nightly Base Image Build"
           echo "  Branch: ${{ github.ref_name }}"
@@ -56,6 +57,7 @@ jobs:
       - name: Wait for complete image + wheel build
         id: wait
         run: |
+          set -eo pipefail
           echo "========================================="
           echo "  Build Complete Image + Wheel (private-torch-neuronx)"
           echo "  Base: ${{ needs.build-base.outputs.base_image }}"
@@ -173,6 +175,7 @@ jobs:
       - name: Wait for main test image build
         id: wait
         run: |
+          set -eo pipefail
           echo "========================================="
           echo "  Build Main Test Image"
           echo "  Base: ${{ needs.build-base.outputs.base_image }}"
