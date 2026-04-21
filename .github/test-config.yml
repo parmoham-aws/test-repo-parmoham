@@ -1,0 +1,162 @@
+# =============================================================================
+# Test Configuration - Neuron CI
+#
+# Defines test suites, their triggers, runner types, and configuration.
+# The runner-determinator job reads this to decide which tests to run
+# and on which runner each suite executes.
+#
+# Runner types:
+#   ubuntu-latest  → GitHub-hosted (lint, fast CPU tests)
+#   neuron.cpu     → Self-hosted EC2 with Neuron SDK (CPU-only tests)
+#   neuron         → Self-hosted EC2 proxy for Trainium/Inferentia hardware tests
+#
+# Fan-out pattern: each suite becomes its own GitHub Actions job
+# with its own runs-on label, running in parallel.
+# =============================================================================
+
+settings:
+  # Default suites that always run on every PR (unless skip-ci)
+  default:
+    - lint
+    - unit-fast
+
+# =============================================================================
+# Label → Suite Mapping
+# PR labels with "run:" prefix trigger additional suites
+# =============================================================================
+label_triggers:
+  "run:full":
+    - integration-basic
+    - integration-full
+  "run:integration":
+    - integration-basic
+  "run:convergence":
+    - training-convergence
+  "run:benchmarks":
+    - performance
+
+# =============================================================================
+# Skip Labels (take precedence over triggers)
+# =============================================================================
+skip_labels:
+  "skip-ci": "all"
+  "skip:lint":
+    - lint
+  "skip:integration":
+    - integration-basic
+    - integration-full
+
+# =============================================================================
+# Test Suite Definitions
+#
+# Each suite specifies:
+#   runner     - GitHub Actions runs-on label
+#   hardware   - cpu | trn1 | inf2
+#   priority   - lower = runs first in summary ordering
+#   triggers   - file glob patterns or "manual"
+#   commands   - shell commands to execute
+# =============================================================================
+test_suites:
+
+  # -------------------------------------------------------------------------
+  # Tier 1: Fast Checks (every PR, GitHub-hosted runners)
+  # -------------------------------------------------------------------------
+  lint:
+    description: "Code linting and formatting checks"
+    priority: 1
+    runner: ubuntu-latest
+    hardware: cpu
+    timeout_minutes: 10
+    triggers:
+      - "**/*.py"
+      - "pyproject.toml"
+      - ".ruff.toml"
+    commands:
+      - "pip install ruff"
+      - "ruff check ."
+      - "ruff format --check ."
+    required: true
+
+  unit-fast:
+    description: "Fast unit tests (no hardware required)"
+    priority: 1
+    runner: ubuntu-latest
+    hardware: cpu
+    timeout_minutes: 15
+    triggers:
+      - "**/*.py"
+    commands:
+      - "pip install pytest"
+      - "python -m pytest tests/unit -x -q --tb=short"
+    required: true
+
+  # -------------------------------------------------------------------------
+  # Tier 2: Component Tests (self-hosted CPU runners - FUTURE)
+  # -------------------------------------------------------------------------
+  unit-torch-neuronx:
+    description: "torch_neuronx unit tests (needs Neuron SDK)"
+    priority: 2
+    runner: neuron.cpu
+    hardware: cpu
+    timeout_minutes: 30
+    triggers:
+      - manual  # Job is not yet active in pr.yml — enable file triggers when job is uncommented
+    commands:
+      - "pytest tests/torch_neuronx/unit -v"
+
+  # -------------------------------------------------------------------------
+  # Tier 3: Integration Tests (Trainium hardware)
+  # -------------------------------------------------------------------------
+  integration-basic:
+    description: "Basic integration tests on Trainium"
+    priority: 3
+    runner: neuron
+    hardware: trn1
+    timeout_minutes: 60
+    triggers:
+      - manual
+    commands:
+      - "pytest tests/integration/basic -v --tb=long"
+    env:
+      NEURON_RT_NUM_CORES: "2"
+
+  # -------------------------------------------------------------------------
+  # Tier 4: Full Suites (manual/label-triggered only)
+  # -------------------------------------------------------------------------
+  integration-full:
+    description: "Full integration test suite"
+    priority: 4
+    runner: neuron
+    hardware: trn1
+    timeout_minutes: 180
+    triggers:
+      - manual
+    commands:
+      - "pytest tests/integration -v --tb=long"
+    env:
+      NEURON_RT_NUM_CORES: "32"
+
+  performance:
+    description: "Performance benchmarks"
+    priority: 4
+    runner: neuron
+    hardware: trn1
+    timeout_minutes: 240
+    triggers:
+      - manual
+    commands:
+      - "python benchmarks/run_benchmarks.py --suite pr"
+    allow_failure: true
+
+  training-convergence:
+    description: "Training convergence tests (long-running)"
+    priority: 5
+    runner: neuron
+    hardware: trn1
+    timeout_minutes: 480
+    triggers:
+      - manual
+    commands:
+      - "python tests/training/convergence.py"
+    nightly: true
+    allow_failure: true

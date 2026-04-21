@@ -1,0 +1,555 @@
+name: PR Validation
+
+# =============================================================================
+# PR Workflow - Fan-Out Per-Suite Pattern
+#
+# Flow:
+#   1. changed-files:       Detect which files changed in the PR
+#   2. runner-determinator:  Read test-config.yml, match files+labels → per-suite booleans
+#   3. Per-suite jobs:       Each suite runs as its own job on the appropriate runner
+#   4. summary:              Aggregate results across all suite jobs
+#
+# Runner types:
+#   ubuntu-latest  → GitHub-hosted (lint, fast CPU tests)
+#   neuron.cpu     → Self-hosted EC2 with Neuron SDK (CPU-only, FUTURE)
+#   neuron         → Self-hosted EC2 proxy for Trainium/Inferentia hardware (FUTURE)
+# =============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      test_suites_override:
+        description: 'Override test suites (comma-separated, e.g., "lint,unit-fast")'
+        required: false
+        type: string
+      force_all:
+        description: 'Run all test suites regardless of changes'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Detect Changed Files
+  # ===========================================================================
+  changed-files:
+    name: Detect Changes
+    runs-on: [self-hosted, linux]
+    outputs:
+      files_json: ${{ steps.changes.outputs.all_changed_files }}
+      any_changed: ${{ steps.changes.outputs.any_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changes
+        uses: tj-actions/changed-files@v44
+        with:
+          json: true
+          escape_json: false
+
+      - name: Show changed files
+        run: |
+          echo "Changed files:"
+          echo '${{ steps.changes.outputs.all_changed_files }}' | jq -r '.[]' 2>/dev/null || echo "No files or parse error"
+
+  # ===========================================================================
+  # Job 2: Runner Determinator - Outputs per-suite booleans for fan-out
+  # ===========================================================================
+  runner-determinator:
+    name: Determine Tests
+    needs: [changed-files]
+    runs-on: [self-hosted, linux]
+    outputs:
+      # Per-suite boolean outputs drive conditional fan-out jobs
+      run_lint: ${{ steps.determine.outputs.run_lint }}
+      run_unit_fast: ${{ steps.determine.outputs.run_unit_fast }}
+      run_unit_torch_neuronx: ${{ steps.determine.outputs.run_unit_torch_neuronx }}
+      run_integration_basic: ${{ steps.determine.outputs.run_integration_basic }}
+      run_integration_full: ${{ steps.determine.outputs.run_integration_full }}
+      run_performance: ${{ steps.determine.outputs.run_performance }}
+      run_training_convergence: ${{ steps.determine.outputs.run_training_convergence }}
+      # Legacy outputs for summary/debugging
+      test_tags: ${{ steps.determine.outputs.test_tags }}
+      should_run: ${{ steps.determine.outputs.should_run }}
+      skip_ci: ${{ steps.determine.outputs.skip_ci }}
+      payload_json: ${{ steps.determine.outputs.payload_json }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Determine test suites from config and labels
+        id: determine
+        env:
+          CHANGED_FILES: ${{ needs.changed-files.outputs.files_json }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_NAME: ${{ github.repository }}
+          TEST_SUITES_OVERRIDE: ${{ github.event.inputs.test_suites_override }}
+          FORCE_ALL: ${{ github.event.inputs.force_all }}
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import os
+          import sys
+          import json
+          import fnmatch
+          import yaml
+
+          def write_output(payload, matched_suites, should_run, skip_ci, all_suite_names):
+              """Write GitHub Action outputs including per-suite booleans."""
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"payload_json={json.dumps(payload)}\n")
+                  f.write(f"test_tags={','.join(sorted(matched_suites)) if matched_suites else ''}\n")
+                  f.write(f"should_run={'true' if should_run else 'false'}\n")
+                  f.write(f"skip_ci={'true' if skip_ci else 'false'}\n")
+
+                  # Per-suite boolean outputs for fan-out jobs
+                  for suite_name in all_suite_names:
+                      safe_name = suite_name.replace('-', '_')
+                      is_active = 'true' if suite_name in matched_suites else 'false'
+                      f.write(f"run_{safe_name}={is_active}\n")
+
+          def error_exit(message, repo_name, pr_number, pr_sha, all_suite_names):
+              """Exit with error payload."""
+              print(f"❌ ERROR: {message}")
+              payload = {
+                  "test_tags": [],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "error": message
+                  }
+              }
+              write_output(payload, set(), False, False, all_suite_names)
+              sys.exit(1)
+
+          # Load inputs
+          changed_files_json = os.environ.get('CHANGED_FILES', '[]')
+          pr_labels_json = os.environ.get('PR_LABELS', '[]')
+          pr_number = os.environ.get('PR_NUMBER', '')
+          pr_sha = os.environ.get('PR_SHA', '')
+          repo_name = os.environ.get('REPO_NAME', '')
+          override = os.environ.get('TEST_SUITES_OVERRIDE', '')
+          force_all = os.environ.get('FORCE_ALL', 'false').lower() == 'true'
+
+          try:
+              changed_files = json.loads(changed_files_json) if changed_files_json else []
+          except json.JSONDecodeError:
+              changed_files = []
+
+          try:
+              pr_labels = json.loads(pr_labels_json) if pr_labels_json else []
+          except json.JSONDecodeError:
+              pr_labels = []
+
+          print(f"Repository: {repo_name}")
+          print(f"PR #{pr_number}, SHA: {pr_sha[:8] if pr_sha else 'N/A'}")
+          print(f"Changed files: {len(changed_files)}")
+          for f in changed_files[:5]:
+              print(f"  - {f}")
+          if len(changed_files) > 5:
+              print(f"  ... and {len(changed_files) - 5} more")
+          print(f"PR Labels: {pr_labels}")
+
+          # Load test config
+          config_path = '.github/test-config.yml'
+          if not os.path.exists(config_path):
+              print(f"⚠ Config not found: {config_path}, using defaults")
+              all_names = {'lint', 'unit_fast'}
+              default_payload = {
+                  "test_tags": ["lint", "unit-fast"],
+                  "metadata": {
+                      "repository": repo_name,
+                      "pr_number": pr_number,
+                      "sha": pr_sha,
+                      "warning": "test-config.yml not found"
+                  }
+              }
+              write_output(default_payload, {"lint", "unit-fast"}, True, False, all_names)
+              sys.exit(0)
+
+          try:
+              with open(config_path) as f:
+                  config = yaml.safe_load(f)
+          except (yaml.YAMLError, Exception) as e:
+              print(f"❌ Failed to parse test-config.yml: {e}")
+              write_output({}, set(), False, False, set())
+              sys.exit(1)
+
+          if config is None:
+              print("❌ test-config.yml is empty")
+              write_output({}, set(), False, False, set())
+              sys.exit(1)
+
+          test_suites = config.get('test_suites', {})
+          settings = config.get('settings', {})
+          default_suites = settings.get('default', [])
+          label_triggers = config.get('label_triggers', {})
+          skip_labels_config = config.get('skip_labels', {})
+
+          all_suite_names = set(test_suites.keys())
+          print(f"Valid test suites: {sorted(all_suite_names)}")
+
+          # Handle override
+          if override:
+              suites = set(s.strip() for s in override.split(',') if s.strip())
+              valid_override = suites & all_suite_names
+              if not valid_override:
+                  error_exit(f"All override suites are invalid: {suites}", repo_name, pr_number, pr_sha, all_suite_names)
+              print(f"\n✓ Using override: {sorted(valid_override)}")
+              payload = {
+                  "test_tags": sorted(valid_override),
+                  "metadata": {"repository": repo_name, "pr_number": pr_number, "sha": pr_sha, "triggered_by": {"override": sorted(valid_override)}}
+              }
+              write_output(payload, valid_override, True, False, all_suite_names)
+              sys.exit(0)
+
+          # Check skip labels
+          skip_all = False
+          suites_to_skip = set()
+          for label in pr_labels:
+              if label in skip_labels_config:
+                  skip_value = skip_labels_config[label]
+                  if skip_value == "all":
+                      skip_all = True
+                      break
+                  elif isinstance(skip_value, list):
+                      suites_to_skip.update(skip_value)
+
+          if skip_all:
+              print("\n⚠ skip-ci detected: Skipping ALL tests")
+              payload = {
+                  "test_tags": [],
+                  "metadata": {"repository": repo_name, "pr_number": pr_number, "sha": pr_sha, "skipped": True}
+              }
+              write_output(payload, set(), False, True, all_suite_names)
+              sys.exit(0)
+
+          # Force all suites
+          if force_all:
+              all_suites = set(test_suites.keys())
+              print(f"\n✓ Force all: {sorted(all_suites)}")
+              payload = {
+                  "test_tags": sorted(all_suites),
+                  "metadata": {"repository": repo_name, "pr_number": pr_number, "sha": pr_sha, "triggered_by": {"force_all": sorted(all_suites)}}
+              }
+              write_output(payload, all_suites, True, False, all_suite_names)
+              sys.exit(0)
+
+          # Match changed files to test suites
+          triggered_by = {"default": list(default_suites), "file_patterns": [], "pr_labels": []}
+          matched_suites = set(default_suites)
+
+          def matches_pattern(filepath, pattern):
+              if '**' in pattern:
+                  parts = pattern.split('**')
+                  if len(parts) == 2:
+                      prefix, suffix = parts
+                      prefix = prefix.rstrip('/')
+                      suffix = suffix.lstrip('/')
+                      if prefix and not filepath.startswith(prefix):
+                          return False
+                      if suffix and not fnmatch.fnmatch(filepath, f"*{suffix}"):
+                          return False
+                      return True
+              return fnmatch.fnmatch(filepath, pattern)
+
+          print("\n--- File Pattern Matching ---")
+          for suite_name, suite_config in test_suites.items():
+              triggers = suite_config.get('triggers', [])
+              for trigger in triggers:
+                  if trigger in ('manual',) or trigger.startswith('label:'):
+                      continue
+                  for changed_file in changed_files:
+                      if matches_pattern(changed_file, trigger):
+                          if suite_name not in matched_suites:
+                              matched_suites.add(suite_name)
+                              triggered_by["file_patterns"].append(suite_name)
+                              print(f"  ✓ {suite_name}: matched by {changed_file}")
+                          break
+
+          # Process label triggers
+          print("\n--- Label Trigger Matching ---")
+          for label in pr_labels:
+              if label in label_triggers:
+                  for suite in label_triggers[label]:
+                      if suite in all_suite_names and suite not in matched_suites:
+                          matched_suites.add(suite)
+                          triggered_by["pr_labels"].append(suite)
+                          print(f"  ✓ {suite}: triggered by label '{label}'")
+
+          # Apply skip labels
+          if suites_to_skip:
+              print(f"\n--- Applying Skip Labels ---")
+              for skip_suite in suites_to_skip:
+                  if skip_suite in matched_suites:
+                      matched_suites.discard(skip_suite)
+                      print(f"  ⏭ Skipping: {skip_suite}")
+
+          # Sort by priority
+          sorted_suites = sorted(matched_suites, key=lambda s: test_suites.get(s, {}).get('priority', 99))
+
+          if not sorted_suites:
+              print("\n⚠ No test suites to run")
+              payload = {
+                  "test_tags": [],
+                  "metadata": {"repository": repo_name, "pr_number": pr_number, "sha": pr_sha, "skipped": True, "reason": "no_matching_suites"}
+              }
+              write_output(payload, set(), False, False, all_suite_names)
+              sys.exit(0)
+
+          triggered_by = {k: v for k, v in triggered_by.items() if v}
+
+          payload = {
+              "test_tags": sorted_suites,
+              "metadata": {"repository": repo_name, "pr_number": pr_number, "sha": pr_sha, "triggered_by": triggered_by}
+          }
+
+          print(f"\n✓ Final test tags: {sorted_suites}")
+          print(f"\n--- Per-Suite Fan-Out ---")
+          for s in sorted_suites:
+              runner = test_suites.get(s, {}).get('runner', 'ubuntu-latest')
+              print(f"  {s} → runs-on: {runner}")
+          print(f"\n--- Payload ---")
+          print(json.dumps(payload, indent=2))
+
+          write_output(payload, set(sorted_suites), True, False, all_suite_names)
+          PYTHON_SCRIPT
+
+      - name: Display determination results
+        run: |
+          echo "=========================================="
+          echo "        RUNNER DETERMINATOR RESULTS       "
+          echo "=========================================="
+          echo ""
+          echo "Test Tags: ${{ steps.determine.outputs.test_tags }}"
+          echo "Should Run: ${{ steps.determine.outputs.should_run }}"
+          echo "Skip CI: ${{ steps.determine.outputs.skip_ci }}"
+          echo ""
+          echo "--- Per-Suite Decisions ---"
+          echo "  lint:                 ${{ steps.determine.outputs.run_lint }}"
+          echo "  unit-fast:            ${{ steps.determine.outputs.run_unit_fast }}"
+          echo "  unit-torch-neuronx:   ${{ steps.determine.outputs.run_unit_torch_neuronx }}"
+          echo "  integration-basic:    ${{ steps.determine.outputs.run_integration_basic }}"
+          echo "  integration-full:     ${{ steps.determine.outputs.run_integration_full }}"
+          echo "  performance:          ${{ steps.determine.outputs.run_performance }}"
+          echo "  training-convergence: ${{ steps.determine.outputs.run_training_convergence }}"
+          echo ""
+          echo "=========================================="
+
+  # ===========================================================================
+  # Fan-Out Jobs: Each suite runs as its own job on the appropriate runner
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Tier 1: Lint (GitHub-hosted)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: "Lint"
+    needs: [runner-determinator]
+    if: needs.runner-determinator.outputs.run_lint == 'true'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linting tools
+        run: pip install ruff==0.8.6
+
+      - name: Run ruff linter
+        run: ruff check .
+
+      - name: Run ruff formatter check
+        run: ruff format --check .
+
+  # ---------------------------------------------------------------------------
+  # Tier 1: Unit Fast (GitHub-hosted)
+  # ---------------------------------------------------------------------------
+  unit-fast:
+    name: "Unit Tests (fast)"
+    needs: [runner-determinator]
+    if: needs.runner-determinator.outputs.run_unit_fast == 'true'
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: pip install pytest==8.3.4
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit -x -q --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Tier 2: Unit torch_neuronx (self-hosted CPU - FUTURE)
+  # ---------------------------------------------------------------------------
+  # unit-torch-neuronx:
+  #   name: "Unit Tests (torch_neuronx)"
+  #   needs: [runner-determinator]
+  #   if: needs.runner-determinator.outputs.run_unit_torch_neuronx == 'true'
+  #   runs-on: neuron.cpu
+  #   timeout-minutes: 30
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Run torch_neuronx unit tests
+  #       run: pytest tests/torch_neuronx/unit -v
+
+  # ---------------------------------------------------------------------------
+  # Tier 3: Integration Basic (Trainium hardware - FUTURE)
+  # ---------------------------------------------------------------------------
+  # integration-basic:
+  #   name: "Integration Tests (basic)"
+  #   needs: [runner-determinator]
+  #   if: needs.runner-determinator.outputs.run_integration_basic == 'true'
+  #   runs-on: neuron
+  #   timeout-minutes: 60
+  #   env:
+  #     NEURON_RT_NUM_CORES: "2"
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Run integration tests
+  #       run: pytest tests/integration/basic -v --tb=long
+
+  # ---------------------------------------------------------------------------
+  # Tier 4: Integration Full (Trainium hardware - FUTURE)
+  # ---------------------------------------------------------------------------
+  # integration-full:
+  #   name: "Integration Tests (full)"
+  #   needs: [runner-determinator]
+  #   if: needs.runner-determinator.outputs.run_integration_full == 'true'
+  #   runs-on: neuron
+  #   timeout-minutes: 180
+  #   env:
+  #     NEURON_RT_NUM_CORES: "32"
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Run full integration tests
+  #       run: pytest tests/integration -v --tb=long
+
+  # ===========================================================================
+  # Summary: Aggregate results from all fan-out jobs
+  # ===========================================================================
+  summary:
+    name: PR Summary
+    needs: [changed-files, runner-determinator, lint, unit-fast]
+    if: always()
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Generate summary
+        env:
+          TEST_TAGS: ${{ needs.runner-determinator.outputs.test_tags }}
+          SHOULD_RUN: ${{ needs.runner-determinator.outputs.should_run }}
+          SKIP_CI: ${{ needs.runner-determinator.outputs.skip_ci }}
+          PAYLOAD: ${{ needs.runner-determinator.outputs.payload_json }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          UNIT_FAST_RESULT: ${{ needs.unit-fast.result }}
+        run: |
+          echo "# 🧪 PR Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$SKIP_CI" == "true" ]; then
+            echo "## ⏭️ CI Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "The \`skip-ci\` label was detected. No tests were run." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          # Determine overall status
+          ALL_PASS=true
+          ANY_FAIL=false
+
+          for result in "$LINT_RESULT" "$UNIT_FAST_RESULT"; do
+            if [ "$result" == "failure" ]; then
+              ANY_FAIL=true
+              ALL_PASS=false
+            fi
+          done
+
+          if [ "$ANY_FAIL" == "true" ]; then
+            echo "## ❌ Some Tests Failed" >> $GITHUB_STEP_SUMMARY
+          elif [ "$ALL_PASS" == "true" ]; then
+            echo "## ✅ All Tests Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⚠️ Tests Completed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Job Results Table
+          echo "### Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Runner | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          status_icon() {
+            case "$1" in
+              success)  echo "✅ pass" ;;
+              failure)  echo "❌ fail" ;;
+              skipped)  echo "⏭️ skip" ;;
+              cancelled) echo "🚫 cancelled" ;;
+              *)        echo "❓ $1" ;;
+            esac
+          }
+
+          echo "| Detect Changes | ubuntu-latest | $(status_icon ${{ needs.changed-files.result }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Determine Tests | ubuntu-latest | $(status_icon ${{ needs.runner-determinator.result }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Lint** | ubuntu-latest | $(status_icon $LINT_RESULT) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Unit Fast** | ubuntu-latest | $(status_icon $UNIT_FAST_RESULT) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Test Tags
+          echo "### Test Tags" >> $GITHUB_STEP_SUMMARY
+          if [ -n "$TEST_TAGS" ]; then
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "$TEST_TAGS" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No test tags were triggered." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Payload details
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>Click to expand JSON payload</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$PAYLOAD" | jq . 2>/dev/null || echo "$PAYLOAD" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY

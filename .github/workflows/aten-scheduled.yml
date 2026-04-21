@@ -1,0 +1,47 @@
+name: ATen Tests (Scheduled)
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Midnight PST (UTC-8)
+permissions:
+  contents: read
+env:
+  AWS_DEFAULT_REGION: us-west-2
+  IMAGE_URI: 882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:joshrj-aten1-kaizen
+jobs:
+  aten-unit-tests:
+    name: ATen Unit Tests (trn1)
+    runs-on: [self-hosted, linux, neuron, neuron.internal_compute, neuron.build-image, "neuron.run-${{ github.run_id }}-aten-unit-tests"]
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Run ATen Unit Tests
+        env:
+          NEURON_LAUNCH_BLOCKING: "1"
+        run: |
+          echo "============================================="
+          echo "       NEURON ENVIRONMENT INFO               "
+          echo "============================================="
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
+          pip install pytest pytest-xdist pytest-html pytest-json-report pytest-forked pytest-cov
+          echo "============================================="
+          echo "           RUNNING ATEN UNIT TESTS           "
+          echo "============================================="
+          mkdir -p outputs/test-reports
+          ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          echo "============================================="
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aten-test-results
+          path: |
+            outputs/
+            *.html
+            *.xml
+          retention-days: 30

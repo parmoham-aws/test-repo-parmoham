@@ -1,0 +1,229 @@
+# Neuron Integration Tests - follows PyTorch test-infra patterns
+# This workflow is designed to be upstreamable to pytorch/pytorch
+#
+# Runner label format: linux.neuron.<instance_type>
+# Examples: linux.neuron.trn1.32xlarge, linux.neuron.trn1.2xlarge
+#
+# Internally, NeuronGithubCI ALI can route to:
+#   - Direct EC2 execution on trn1 instances
+#   - c5 proxy → Kaizen cluster (instance_type passed as input)
+name: neuron-trn1
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - release/*
+    tags:
+      - ciflow/neuron/*
+  workflow_dispatch:
+  schedule:
+    - cron: 0 6 * * *  # Run daily at 6 AM UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}-${{ github.ref_type == 'branch' && github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+env:
+  GIT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  # Neuron Docker image - same pattern as PyTorch's ci-image references
+  DOCKER_IMAGE: 624280435858.dkr.ecr.us-west-2.amazonaws.com/golden_runner_images:neuron-training-torch-neuronx
+  AWS_DEFAULT_REGION: us-west-2
+
+jobs:
+  # Test job with matrix strategy - follows PyTorch _rocm-test.yml pattern
+  test:
+    if: github.repository_owner == 'awsjoshir' || github.repository_owner == 'aws-neuron'
+    strategy:
+      matrix:
+        include:
+          # Shard 1: ATen unit tests
+          - config: "aten"
+            shard: 1
+            num_shards: 1
+            # TODO: Change to "linux.neuron.trn1.32xlarge" when ALI supports it
+            runner: ["self-hosted", "linux", "neuron"]
+            test_command: ".ci/pytorch/test_aten.sh"
+          # Future shards can be added here:
+          # - config: "default"
+          #   shard: 1
+          #   num_shards: 4
+          #   runner: ["self-hosted", "linux", "neuron"]
+          #   test_command: ".ci/pytorch/test.sh"
+      fail-fast: false
+
+    name: ${{ matrix.config }}-${{ matrix.shard }}-${{ matrix.num_shards }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout PyTorch
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Neuron
+        run: |
+          echo "=== Neuron Device Check ==="
+          # Similar to PyTorch's rocminfo check for ROCm
+          if command -v neuron-ls &> /dev/null; then
+            neuron-ls
+            NEURON_DEVICE_COUNT=$(neuron-ls | grep -c "neuron" || echo "0")
+            echo "Neuron devices found: ${NEURON_DEVICE_COUNT}"
+            if [[ "${NEURON_DEVICE_COUNT}" -lt 1 ]]; then
+              echo "Warning: No Neuron devices detected"
+            fi
+          elif [ -f /opt/aws/neuron/bin/neuron-ls ]; then
+            /opt/aws/neuron/bin/neuron-ls
+          else
+            echo "neuron-ls not available - may be running on proxy node"
+          fi
+
+      - name: ECR Login
+        run: |
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+            docker login --username AWS --password-stdin \
+            624280435858.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+
+      - name: Pull Docker image
+        run: |
+          echo "Pulling Docker image: ${DOCKER_IMAGE}"
+          docker pull "${DOCKER_IMAGE}"
+
+      - name: Get workflow job id
+        id: get-job-id
+        if: always()
+        run: |
+          echo "job-id=${{ github.job }}-${{ matrix.config }}-${{ matrix.shard }}" >> "${GITHUB_OUTPUT}"
+          echo "job-name=${{ matrix.config }}-${{ matrix.shard }}-${{ matrix.num_shards }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Test
+        id: test
+        timeout-minutes: 210
+        env:
+          BUILD_ENVIRONMENT: linux-neuron-py3-trn1
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: ${{ github.job }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          JOB_ID: ${{ steps.get-job-id.outputs.job-id }}
+          JOB_NAME: ${{ steps.get-job-id.outputs.job-name }}
+          SHA1: ${{ github.event.pull_request.head.sha || github.sha }}
+          TEST_CONFIG: ${{ matrix.config }}
+          SHARD_NUMBER: ${{ matrix.shard }}
+          NUM_TEST_SHARDS: ${{ matrix.num_shards }}
+          TEST_COMMAND: ${{ matrix.test_command }}
+        run: |
+          set -x
+
+          # Determine test command - follows PyTorch pattern
+          if [[ -z "${TEST_COMMAND}" ]]; then
+            if [[ "${TEST_CONFIG}" == "aten" ]]; then
+              TEST_COMMAND=".ci/pytorch/test_aten.sh"
+            else
+              TEST_COMMAND=".ci/pytorch/test.sh"
+            fi
+          fi
+
+          # Check if test script exists, fallback to inline tests
+          if [[ ! -f "${TEST_COMMAND}" ]]; then
+            echo "Test script ${TEST_COMMAND} not found, using inline tests"
+            TEST_COMMAND="python3 -m pytest test/test_aten/ -v --tb=short || echo 'No test directory found'"
+          fi
+
+          # PyTorch pattern: start detached container, then exec
+          # shellcheck disable=SC2086
+          container_name=$(docker run \
+            -e BUILD_ENVIRONMENT \
+            -e PR_NUMBER \
+            -e GITHUB_ACTIONS \
+            -e GITHUB_REPOSITORY \
+            -e GITHUB_WORKFLOW \
+            -e GITHUB_JOB \
+            -e GITHUB_RUN_ID \
+            -e GITHUB_RUN_NUMBER \
+            -e GITHUB_RUN_ATTEMPT \
+            -e JOB_ID \
+            -e JOB_NAME \
+            -e SHA1 \
+            -e TEST_CONFIG \
+            -e SHARD_NUMBER \
+            -e NUM_TEST_SHARDS \
+            -e AWS_DEFAULT_REGION \
+            -e MAX_JOBS="$(nproc --ignore=2)" \
+            --security-opt seccomp=unconfined \
+            --cap-add=SYS_PTRACE \
+            --ipc=host \
+            --shm-size=8g \
+            --tty \
+            --detach \
+            --name="ci-${GITHUB_RUN_ID}-${TEST_CONFIG}-${SHARD_NUMBER}" \
+            --user root \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            "${DOCKER_IMAGE}"
+          )
+
+          # Save container name for cleanup
+          echo "CONTAINER_NAME=${container_name}" >> "${GITHUB_ENV}"
+
+          # Execute tests inside container - PyTorch pattern
+          docker exec -t "${container_name}" sh -c "
+            set -e
+            echo '=== Environment Info ==='
+            python3 --version
+            python3 -c 'import torch; print(f\"PyTorch: {torch.__version__}\")'
+            python3 -c 'import torch_neuronx; print(f\"torch-neuronx: {torch_neuronx.__version__}\")' || echo 'torch-neuronx not available'
+
+            echo ''
+            echo '=== Installing wheel and test dependencies ==='
+            pip install pytest pytest-xdist numpy
+
+            echo ''
+            echo '=== Neuron Device Status ==='
+            neuron-ls 2>/dev/null || /opt/aws/neuron/bin/neuron-ls 2>/dev/null || echo 'neuron-ls not in container'
+
+            echo ''
+            echo '=== Running tests ==='
+            ${TEST_COMMAND}
+          "
+
+      - name: Print test logs
+        if: always() && steps.test.conclusion
+        run: |
+          cat test/**/*_toprint.log 2>/dev/null || true
+
+      - name: Save test results
+        if: always()
+        run: |
+          # Copy test results from container - PyTorch pattern
+          docker exec -t "${CONTAINER_NAME}" sh -c "
+            if [ -d test/test-reports ]; then
+              cp -R test/test-reports /var/lib/jenkins/workspace/test/ 2>/dev/null || true
+            fi
+          " || true
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always() && steps.test.conclusion && steps.test.conclusion != 'skipped'
+        with:
+          name: test-reports-${{ matrix.config }}-${{ matrix.shard }}-${{ matrix.num_shards }}
+          path: test/test-reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [[ -n "${CONTAINER_NAME}" ]]; then
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+          fi

@@ -1,0 +1,77 @@
+#!/bin/bash
+
+set -x # echo commands executed
+set -e # fail script on any individual command failing
+set -u # fail if variable referenced but not defined
+set -o pipefail # propagate error code from the failed script
+
+# Initialize BUILD_ARGS array
+BUILD_ARGS=()
+export JSON_REPORT=false
+
+# Get the target, default to empty string if not provided
+target=${1:-""}
+
+echo "$target"
+
+# Function to run formatting checks
+run_format_checks() {
+    echo "Running formatting checks..."
+    # Run Brazil Python format checks
+    if ! brazilpython check_format; then
+        echo "❌ Brazil Python format checks failed!"
+        return 1
+    fi
+
+    echo "✅ All formatting checks passed!"
+    return 0
+}
+
+
+if [ "$target" = "clean" ]; then
+    rm -rf build/*
+    exit 0
+fi
+
+if [ "$target" = ^test_ ]; then
+    echo "We have not integrated tests with Kaizen yet.... skipping tests"
+    exit 0
+fi
+
+
+if [ "$target" = "check_format" ]; then
+    run_format_checks || exit 1
+    exit 0
+fi
+
+# TODO: Currently only runs formatting checks, will eventually run tests and other checks
+if [ "$target" = "release" ]; then
+    # run_format_checks || exit 1
+    brazilpython brazil_wheel
+    brazilpython
+    exit 0
+fi
+
+while [[ $# -gt 0 ]]; do
+    key=$1
+    case $key in
+        --json_report)
+            JSON_REPORT=true; shift 1;;
+        *)
+            BUILD_ARGS+=("$1"); shift;;
+    esac
+done
+
+if [ "$JSON_REPORT" = true ]; then
+    sed -i "/^$target=/s/'$/ --json_report'/" "$PWD/setup.cfg"
+fi
+
+# If no specific conditions met, pass all arguments to brazilpython
+if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
+    echo "Running brazil-python build with target: ${BUILD_ARGS[@]:-}"
+    brazilpython "${BUILD_ARGS[@]:-}"
+else
+    # Default case if no arguments provided
+    echo "No target specified, running default brazil-python build"
+    brazilpython
+fi
