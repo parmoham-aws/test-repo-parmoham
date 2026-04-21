@@ -1,0 +1,113 @@
+name: Post-Merge Tests
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+env:
+  AWS_DEFAULT_REGION: us-west-2
+jobs:
+  # ── Job 1: Build test image (once) ─────────────────────────
+  build-test-image:
+    name: Build Test Image
+    runs-on: [
+      self-hosted,
+      linux,
+      neuron.build-image,
+      "neuron.dockerfile:Dockerfile.nightly-test",
+      "neuron.base-image:882938390504.dkr.ecr.us-west-2.amazonaws.com/neuron-image-builder-alpha:private-neuron-integration-dev-nightly-nightly-base-stable",
+      "neuron.run-${{ github.run_id }}-build-test-image"
+    ]
+    timeout-minutes: 120
+    outputs:
+      test_image: ${{ steps.wait.outputs.image_uri }}
+    steps:
+      - name: Wait for test image build
+        id: wait
+        run: |
+          echo "========================================="
+          echo "  Build Post-Merge Test Image"
+          echo "  Branch: ${{ github.ref_name }}"
+          echo "  SHA: ${{ github.sha }}"
+          echo "  Run ID: ${{ github.run_id }}"
+          echo "========================================="
+          /opt/neuron-ci/wait-for-nightly-image.sh | tee /tmp/output.log
+          IMAGE_URI=$(grep "Nightly base image ready:" /tmp/output.log | sed 's/.*ready: //')
+          echo "Test image ready: $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+  # ── Job 2: Simple smoke test using the built image ─────────
+  smoke-test:
+    name: Post-Merge Smoke Test
+    needs: [build-test-image]
+    runs-on: [
+      self-hosted,
+      linux,
+      neuron,
+      neuron.internal_compute,
+      "neuron.image:${{ needs.build-test-image.outputs.test_image }}",
+      "neuron.run-${{ github.run_id }}-smoke-test"
+    ]
+    timeout-minutes: 30
+    steps:
+      - name: Smoke Test
+        run: |
+          echo "============================================="
+          echo "  Post-Merge Smoke Test"
+          echo "  Image: ${{ needs.build-test-image.outputs.test_image }}"
+          echo "============================================="
+          echo "Hostname: $(hostname)"
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
+          echo "  ✓ Smoke test passed"
+          echo "============================================="
+
+  # ── Job 3: ATen Unit Tests using the built image ───────────
+  aten-unit-tests:
+    name: ATen Unit Tests
+    needs: [build-test-image]
+    runs-on: [
+      self-hosted,
+      linux,
+      neuron,
+      neuron.internal_compute,
+      "neuron.image:${{ needs.build-test-image.outputs.test_image }}",
+      "neuron.run-${{ github.run_id }}-aten-unit-tests"
+    ]
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ATen Unit Tests
+        env:
+          NEURON_LAUNCH_BLOCKING: "1"
+        run: |
+          echo "============================================="
+          echo "       NEURON ENVIRONMENT INFO               "
+          echo "============================================="
+          python3 --version
+          python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" || echo "PyTorch not available"
+          neuron-ls || /opt/aws/neuron/bin/neuron-ls || echo "neuron-ls not available"
+          echo "============================================="
+          echo "           RUNNING ATEN UNIT TESTS           "
+          echo "============================================="
+          mkdir -p outputs/test-reports
+          ./tools/run-test-parallel --skip-distributed --coverage --json-report --report-dir=outputs/test-reports
+          echo "============================================="
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-aten-test-results
+          path: |
+            outputs/
+            *.html
+            *.xml
+          retention-days: 30
