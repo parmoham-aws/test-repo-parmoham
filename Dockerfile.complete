@@ -1,0 +1,59 @@
+# ============================================================
+# Dockerfile.complete — torch-neuron complete image
+#
+# Builds on top of the nightly base image by installing the
+# pre-built torch-neuron wheel (from private-torch-neuronx) from the build context.
+#
+# The wheel is built in CodeBuild's pre_build phase (inside the
+# base image container) and placed in the build context before
+# this Dockerfile runs. This ensures the wheel and image use
+# the exact same commit.
+#
+# This is ~5 min (pip install from local .whl) vs ~60 min
+# (building from source inside Docker).
+#
+# Build args:
+#   BASE_IMAGE_URI — ECR URI of the nightly base image
+#   GITHUB_TOKEN   — GitHub token for cloning repo (test files)
+#   GITHUB_REPOSITORY — e.g. "aws-neuron/neuron-integration-dev"
+# ============================================================
+
+ARG BASE_IMAGE_URI
+FROM ${BASE_IMAGE_URI}
+
+ARG GITHUB_TOKEN=""
+ARG GITHUB_REPOSITORY="aws-neuron/neuron-integration-dev"
+
+# ── Install torch-neuron from local wheel ────────────────────
+# The wheel file is placed in the build context by CodeBuild's
+# pre_build phase (built from private-torch-neuronx). COPY it in and pip install.
+COPY *.whl /tmp/
+RUN WHL_FILE=$(ls /tmp/*.whl 2>/dev/null | head -1) && \
+    if [ -n "$WHL_FILE" ]; then \
+      echo "Installing torch-neuron from local wheel: $(basename $WHL_FILE)" && \
+      uv pip install --no-deps "$WHL_FILE" && \
+      rm -f /tmp/*.whl && \
+      echo "torch-neuron installed successfully from local wheel"; \
+    else \
+      echo "ERROR: No .whl file found in build context" && \
+      exit 1; \
+    fi
+
+# ── Clone repo for test files ────────────────────────────────
+# Tests reference files from the repo (e.g. conftest.py, specs/)
+# We clone without building since the wheel is already installed.
+RUN if [ -n "${GITHUB_TOKEN}" ]; then \
+      REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2) && \
+      git clone "https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+        "/workspace/${REPO_NAME}" && \
+      echo "Repo cloned to /workspace/${REPO_NAME}"; \
+    else \
+      echo "WARNING: GITHUB_TOKEN not set, skipping repo clone"; \
+    fi
+
+# ── Verify installation ───────────────────────────────────────
+RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -c "import torch_neuron; print('torch_neuron OK:', torch_neuron.__version__)" || \
+    echo "WARNING: torch_neuron import check failed (may need Neuron runtime at test time)"
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

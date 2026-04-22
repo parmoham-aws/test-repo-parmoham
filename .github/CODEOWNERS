@@ -1,0 +1,14 @@
+# Default owners for everything in the repo
+* @awsjoshir
+
+# Python code
+torch_neuronx/ @awsjoshir
+tests/ @awsjoshir
+
+# CI/CD
+.github/ @awsjoshir
+
+# Build system
+CMakeLists.txt @awsjoshir
+setup.py @awsjoshir
+BUILD.bazel @awsjoshir
