@@ -43,8 +43,8 @@ jobs:
       linux,
       neuron.build-nightly-image,
       neuron.build-nightly-whl,
-      neuron.create-test-whl,
       "neuron.dockerfile:Dockerfile.complete",
+      "neuron.script:build-test-wheel.sh",
       "neuron.run-${{ github.run_id }}-build-nightly-whl",
       "neuron.base-image:${{ needs.build-base.outputs.base_image }}"
     ]
