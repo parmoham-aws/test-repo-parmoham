@@ -53,7 +53,7 @@ jobs:
       - name: Verify image tag
         env:
           NIGHTLY_IMAGE_URI: ${{ needs.build-base.outputs.base_image }}
-          TAG_SUFFIX: stable
+          TAG_SUFFIX: my-custom-tag
         run: |
           echo "========================================="
           echo "  Image Tag Verification"
