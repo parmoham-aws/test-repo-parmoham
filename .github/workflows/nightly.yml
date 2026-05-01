@@ -34,6 +34,35 @@ jobs:
           echo "Captured image URI: $IMAGE_URI"
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
+  # ── Job 1b: Tag Base Image ──────────────────────────────────
+  # Tags the base image using the flexible tagging label.
+  # The webhook Lambda invokes the Nightly Tagger Lambda asynchronously,
+  # then this runner verifies the tag was applied via verify-image-tag.sh.
+  tag-base-image:
+    name: Tag Base Image as Stable
+    needs: [build-base]
+    if: success()
+    runs-on: [
+      self-hosted,
+      linux,
+      "neuron.tag-image-suffix:stable",
+      "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
+      "neuron.run-${{ github.run_id }}-tag-base-image",
+    ]
+    steps:
+      - name: Verify image tag
+        env:
+          NIGHTLY_IMAGE_URI: ${{ needs.build-base.outputs.base_image }}
+          TAG_SUFFIX: stable
+        run: |
+          echo "========================================="
+          echo "  Image Tag Verification"
+          echo "  Image: $NIGHTLY_IMAGE_URI"
+          echo "  Suffix: $TAG_SUFFIX"
+          echo "========================================="
+          /opt/neuron-ci/verify-image-tag.sh
+          echo "✓ ECR image tagging complete"
+
   # ── Job 2: Build Complete Image + Wheel ─────────────────────
   build-nightly-whl:
     name: Build Complete Image + Wheel (private-torch-neuronx)
@@ -96,7 +125,7 @@ jobs:
   # ── Job 3: Promote to Stable ───────────────────────────────
   promote-to-stable:
     name: Promote to Stable
-    needs: [build-base, build-nightly-whl]
+    needs: [build-base]
     if: success()
     runs-on: [
       self-hosted,
@@ -104,7 +133,7 @@ jobs:
       neuron.tag-nightly-stable,
       "neuron.nightly-image:${{ needs.build-base.outputs.base_image }}",
       "neuron.run-${{ github.run_id }}-promote-to-stable",
-      "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
+      # "neuron.nightly-whl-stable-release:${{ needs.build-nightly-whl.outputs.request_id }}"
     ]
     permissions:
       contents: write
